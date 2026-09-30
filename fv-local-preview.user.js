@@ -1,123 +1,102 @@
 // ==UserScript==
-// @name         FV 本地文件网页预览器（网址+文件选择）
-// @namespace    com.example.fv
-// @match        *://*/*
-// @match        file:///*
-// @run-at       document-idle
-// @grant        GM_xmlhttpRequest
+// @name         FV 本地文件预览器（固定网址应用版）
+// @namespace    com.example.fv.app
+// @match        https://fv-local-preview.invalid/*
+// @match        http://fv-local-preview.invalid/*
+// @match        https://example.com/fv*
+// @run-at       document-end
+// @grant        none
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  // 防止重复注入
-  if (document.getElementById('fv-preview-root')) return;
+  // 防止重复初始化
+  if (document.getElementById('fv-app')) return;
 
-  // ========== 样式 ==========
-  const style = document.createElement('style');
-  style.textContent = `
-    #fv-preview-root * { box-sizing: border-box; }
-    #fv-fab {
-      position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
-      width: 48px; height: 48px; border-radius: 50%;
-      background: #2f7d63; color: #fff; border: none; font-size: 20px;
-      cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,.4);
-    }
-    #fv-panel {
-      position: fixed; inset: 0; z-index: 2147483646;
-      background: #141414; color: #ddd; font: 14px/1.5 system-ui;
-      display: none; flex-direction: column;
-    }
-    #fv-panel.show { display: flex; }
-    .fv-bar {
-      padding: 8px; background: #1e1e1e; border-bottom: 1px solid #333;
-      display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
-    }
-    .fv-bar input[type=text] {
-      flex: 1; min-width: 120px; padding: 6px 8px;
-      background: #262626; color: #fff; border: 1px solid #444;
-      border-radius: 4px; font-size: 13px;
-    }
-    .fv-bar input[type=file] { color: #ccc; flex: 1; min-width: 120px; }
-    .fv-bar button {
-      padding: 6px 10px; border: 0; border-radius: 4px;
-      background: #376; color: #fff; cursor: pointer;
-    }
-    .fv-bar button.fv-close { background: #a33; }
-    #fv-frame {
-      flex: 1; width: 100%; border: 0; background: #fff;
-      min-height: 0;
-    }
-    #fv-json {
-      flex: 1; margin: 0; padding: 10px; overflow: auto;
-      white-space: pre-wrap; background: #0f1115; color: #d6deeb;
-      font-family: ui-monospace, Menlo, monospace;
-    }
-    #fv-json .k { color: #7fdbca; }
-    #fv-json .s { color: #a5e075; }
-    #fv-json .n { color: #f0a45c; }
-    #fv-json .b { color: #c792ea; }
-    #fv-info { font-size: 12px; color: #888; padding: 4px 8px; }
-    .fv-tip {
-      position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%);
-      background: #333; color: #fff; padding: 8px 16px; border-radius: 6px;
-      font-size: 13px; z-index: 2147483647; display: none;
-      box-shadow: 0 4px 12px rgba(0,0,0,.4);
-    }
-    .fv-hint { font-size: 11px; color: #888; padding: 2px 8px; }
-  `;
-  document.head.appendChild(style);
+  // 把原页面完全清空，改成独立预览工具
+  const oldBody = document.body;
+  oldBody.innerHTML = '';
 
-  // ========== DOM ==========
-  const fab = document.createElement('button');
-  fab.id = 'fv-fab';
-  fab.textContent = '📂';
-  fab.title = 'FV 本地文件预览';
+  // ========== 构建界面 ==========
+  oldBody.innerHTML = `
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: #141414; }
+      body { font: 14px/1.5 system-ui, sans-serif; color: #ddd; display: flex; flex-direction: column; }
 
-  const panel = document.createElement('div');
-  panel.id = 'fv-panel';
-  panel.innerHTML = `
-    <div class="fv-bar">
-      <input type="text" id="fv-url" placeholder="输入 file:// 或 content:// 地址，如 file:///sdcard/test.html">
-      <button id="fv-urlopen">打开网址</button>
+      #fv-top {
+        padding: 8px; background: #1e1e1e; border-bottom: 1px solid #333;
+        display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+      }
+      #fv-file { color: #ccc; flex: 1; min-width: 120px; }
+      .fv-btn {
+        padding: 7px 12px; border: 0; border-radius: 4px;
+        background: #2f7d63; color: #fff; cursor: pointer; font-size: 13px;
+      }
+      .fv-btn:hover { background: #3a9a7c; }
+      .fv-btn.orange { background: #b66; }
+      .fv-btn.orange:hover { background: #c77; }
+      .fv-check { font-size: 12px; color: #9aa; display: flex; align-items: center; gap: 4px; }
+
+      #fv-info {
+        padding: 4px 10px; font-size: 12px; color: #888;
+        background: #1a1a1a; border-bottom: 1px solid #222;
+      }
+      #fv-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+      #fv-frame {
+        flex: 1; width: 100%; border: 0; background: #fff;
+        display: none; min-height: 0;
+      }
+      #fv-json {
+        flex: 1; margin: 0; padding: 10px; overflow: auto;
+        white-space: pre-wrap; background: #0f1115; color: #d6deeb;
+        font-family: ui-monospace, Menlo, monospace; display: none;
+      }
+      #fv-json .k { color: #7fdbca; }
+      #fv-json .s { color: #a5e075; }
+      #fv-json .n { color: #f0a45c; }
+      #fv-json .b { color: #c792ea; }
+
+      .fv-tip {
+        position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%);
+        background: #a33; color: #fff; padding: 8px 16px; border-radius: 6px;
+        font-size: 13px; z-index: 2147483647; display: none;
+        box-shadow: 0 4px 12px rgba(0,0,0,.4);
+      }
+    </style>
+
+    <div id="fv-app">
+      <div id="fv-top">
+        <input id="fv-file" type="file" accept=".html,.htm,.json,.txt">
+        <button class="fv-btn" id="fv-reload">重载</button>
+        <button class="fv-btn orange" id="fv-fullscreen" title="直接替换整个页面显示html">全屏模式</button>
+        <label class="fv-check"><input type="checkbox" id="fv-auto" checked> iframe空白自动全屏</label>
+      </div>
+      <div id="fv-info">选择 html/json 文件，将以网页/高亮形式打开</div>
+      <div id="fv-body">
+        <iframe id="fv-frame"></iframe>
+        <pre id="fv-json"></pre>
+      </div>
     </div>
-    <div class="fv-bar">
-      <input type="file" id="fv-file" accept=".html,.htm,.json,.txt">
-      <button id="fv-fullscreen">全屏模式</button>
-      <label><input type="checkbox" id="fv-auto" checked> 自动全屏</label>
-      <button id="fv-reload">重载</button>
-      <button class="fv-close" id="fv-close">关闭</button>
-    </div>
-    <div class="fv-hint">提示：网址方式读取 content:// 可能失败，建议用文件选择器；file:// 大部分可用。</div>
-    <div id="fv-info">选择文件或输入网址</div>
-    <iframe id="fv-frame" style="display:none"></iframe>
-    <pre id="fv-json" style="display:none"></pre>
+    <div class="fv-tip" id="fv-tip"></div>
   `;
 
-  const tip = document.createElement('div');
-  tip.className = 'fv-tip';
-  tip.id = 'fv-tip';
-
-  document.body.appendChild(fab);
-  document.body.appendChild(panel);
-  document.body.appendChild(tip);
-
-  // ========== 变量 ==========
-  const urlInput = panel.querySelector('#fv-url');
-  const urlOpenBtn = panel.querySelector('#fv-urlopen');
-  const fileInput = panel.querySelector('#fv-file');
-  const iframe = panel.querySelector('#fv-frame');
-  const jsonPre = panel.querySelector('#fv-json');
-  const info = panel.querySelector('#fv-info');
-  const autoCheck = panel.querySelector('#fv-auto');
-  const fullscreenBtn = panel.querySelector('#fv-fullscreen');
-  const reloadBtn = panel.querySelector('#fv-reload');
-  const closeBtn = panel.querySelector('#fv-close');
+  // ========== 获取元素 ==========
+  const fileInput = document.getElementById('fv-file');
+  const iframe = document.getElementById('fv-frame');
+  const jsonPre = document.getElementById('fv-json');
+  const info = document.getElementById('fv-info');
+  const tip = document.getElementById('fv-tip');
+  const autoCheck = document.getElementById('fv-auto');
+  const fullBtn = document.getElementById('fv-fullscreen');
+  const reloadBtn = document.getElementById('fv-reload');
 
   let lastText = '';
   let lastName = '';
 
-  // ========== 工具函数 ==========
+  // ========== 工具 ==========
   function showTip(msg, duration = 3000) {
     tip.textContent = msg;
     tip.style.display = 'block';
@@ -138,32 +117,12 @@
     });
   }
 
-  function fetchUrl(url) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: url,
-        responseType: 'text',
-        overrideMimeType: 'text/plain; charset=utf-8',
-        onload: (res) => {
-          if (res.status >= 200 && res.status < 300 || res.status === 0) {
-            resolve(res.responseText);
-          } else {
-            reject(new Error('HTTP ' + res.status));
-          }
-        },
-        onerror: (err) => reject(err)
-      });
-    });
-  }
-
-  // ========== 渲染 ==========
+  // ========== JSON 渲染 ==========
   function renderJson(text) {
     iframe.style.display = 'none';
     jsonPre.style.display = 'block';
     jsonPre.textContent = text;
-    info.textContent = `已加载：${lastName}（JSON）`;
-
+    info.textContent = `已导入：${lastName}（JSON）`;
     try {
       const pretty = JSON.stringify(JSON.parse(text), null, 2)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -175,17 +134,17 @@
           : '<span class="n">' + m + '</span>'
       );
     } catch (e) {
-      showTip('JSON 格式不标准，已显示原文');
+      showTip('不是标准 JSON，已显示原文');
     }
   }
 
+  // ========== iframe 渲染 ==========
   function renderHtmlIframe(text) {
-    iframe.style.display = 'none';
     jsonPre.style.display = 'none';
-    iframe.removeAttribute('sandbox');
     iframe.style.display = 'block';
+    iframe.removeAttribute('sandbox');
     iframe.srcdoc = text;
-    info.textContent = `已加载：${lastName}（HTML）`;
+    info.textContent = `已导入：${lastName}（iframe 模式）`;
 
     if (autoCheck.checked) {
       setTimeout(() => {
@@ -193,25 +152,42 @@
           const doc = iframe.contentDocument;
           const bodyLen = doc && doc.body ? doc.body.innerHTML.length : 0;
           if (bodyLen === 0 && text.trim().length > 0) {
-            showTip('iframe 空白，自动切换全屏');
-            renderHtmlFullscreen(text);
+            showTip('iframe 空白，已自动切换全屏模式');
+            renderHtmlFull(text);
           }
-        } catch (e) { /* 跨域忽略 */ }
+        } catch (e) {
+          console.warn('[FV] 无法读取iframe内容，跳过自动检测', e);
+        }
       }, 600);
     }
   }
 
-  function renderHtmlFullscreen(text) {
+  // ========== 全屏渲染 ==========
+  function renderHtmlFull(text) {
     iframe.style.display = 'none';
     jsonPre.style.display = 'none';
-    info.textContent = `已加载：${lastName}（全屏模式）`;
+    info.textContent = `已导入：${lastName}（全屏模式）`;
+
+    const backBtn = `
+      <style>#fv-back-btn{position:fixed;top:8px;left:8px;z-index:999999;background:#2f7d63;color:#fff;border:0;border-radius:4px;padding:8px 14px;font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}</style>
+      <button id="fv-back-btn" onclick="location.href='https://fv-local-preview.invalid/'">← 返回预览器</button>
+    `;
+
+    let fullHtml = text;
+    if (/<body[^>]*>/i.test(fullHtml)) {
+      fullHtml = fullHtml.replace(/<body[^>]*>/i, match => match + backBtn);
+    } else {
+      fullHtml = backBtn + fullHtml;
+    }
+
     setTimeout(() => {
       document.open();
-      document.write(text);
+      document.write(fullHtml);
       document.close();
     }, 50);
   }
 
+  // ========== 统一入口 ==========
   function render(text) {
     if (/\.json$/i.test(lastName) || /^\s*[[{]/.test(text.trim())) {
       renderJson(text);
@@ -221,68 +197,27 @@
   }
 
   // ========== 事件 ==========
-  // 文件选择
   fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     lastName = file.name;
     try {
       lastText = await readFile(file);
+      console.log('[FV] 读取成功:', lastName, '长度:', lastText.length);
       render(lastText);
     } catch (err) {
+      console.error('[FV] 读取失败:', err);
       alert('读取失败：' + err);
     }
   });
 
-  // 网址打开
-  urlOpenBtn.onclick = async () => {
-    let url = urlInput.value.trim();
-    if (!url) return;
-
-    // 如果输入的是 /sdcard/xxx.html 自动补全为 file:///sdcard/xxx.html
-    if (!/^(file|content|https?):\/\//i.test(url)) {
-      url = 'file://' + url;
-    }
-
-    showTip('正在读取地址…');
-    try {
-      lastText = await fetchUrl(url);
-      lastName = url.split('/').pop() || 'url';
-      render(lastText);
-      showTip('读取成功');
-    } catch (err) {
-      console.error('[FV] 网址读取失败', err);
-      showTip('读取失败：' + err.message + '，请改用文件选择器', 5000);
-    }
-  };
-
-  // 回车键触发打开网址
-  urlInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') urlOpenBtn.click();
-  });
-
-  // 重载
   reloadBtn.onclick = () => {
     if (lastText) render(lastText);
-    else showTip('请先选择文件或输入网址');
+    else showTip('请先选择文件');
   };
 
-  // 全屏
-  fullscreenBtn.onclick = () => {
-    if (lastText) renderHtmlFullscreen(lastText);
-    else showTip('请先选择文件或输入网址');
+  fullBtn.onclick = () => {
+    if (lastText) renderHtmlFull(lastText);
+    else showTip('请先选择文件');
   };
-
-  // 关闭
-  closeBtn.onclick = () => panel.classList.remove('show');
-
-  // 悬浮球
-  fab.onclick = () => panel.classList.add('show');
-
-  // 清理
-  window.addEventListener('beforeunload', () => {
-    if (iframe.srcdoc) iframe.srcdoc = '';
-  });
-
-  console.log('[FV] 优化版已启动');
 })();
