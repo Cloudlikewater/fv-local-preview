@@ -78,14 +78,18 @@
     }
     function decodeText(buf) {
       var bytes = new Uint8Array(buf);
+      // BOM
       if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return td('utf-8', bytes.subarray(3));
       if (bytes[0] === 0xFF && bytes[1] === 0xFE) return td('utf-16le', bytes.subarray(2));
       if (bytes[0] === 0xFE && bytes[1] === 0xFF) return td('utf-16be', bytes.subarray(2));
+      // UTF-8 严格
       try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) {}
+      // meta / xml charset
       var probe = '';
       try { probe = new TextDecoder('utf-8').decode(bytes.slice(0, 4096)); } catch (e) {}
       var m = probe.match(/charset\s*=\s*["']?\s*([\w-]+)/i);
       if (m) { try { return td(m[1], bytes); } catch (e) {} }
+      // 常见中文编码兜底
       var tries = ['gbk', 'gb18030', 'big5', 'shift_jis', 'euc-kr', 'iso-8859-1'];
       for (var i = 0; i < tries.length; i++) { try { return td(tries[i], bytes); } catch (e) {} }
       return td('utf-8', bytes);
@@ -283,7 +287,7 @@
       msg('PDF 已就绪：多数 WebView 不支持内嵌预览，建议下载后打开');
     }
 
-    /* ---------- MHTML 解析 ---------- */
+    /* ---------- MHTML 解析（关键：Chromium 已不再自动渲染 MHTML） ---------- */
     function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
     function qpDecode(s) {
       return s.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, function (m, h) {
@@ -437,23 +441,58 @@
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
       instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
-        ' 安装方式：① 复制 → ChromeXt 新建脚本粘贴保存；② 下载 .user.js → 用 ChromeXt「从文件导入」打开安装。';
+        ' 推荐顺序：① 尝试一键安装 → ② 下载后在文件管理器用 ChromeXt 打开 → ③ 复制粘贴。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
     }
+
+    /* 一键安装：ChromeXt 识别「以 .user.js 结尾的 URL」并弹安装提示。
+       Chrome 只禁用 data: 顶层导航，blob: 可以导航，因此用 blob + #xxx.user.js 后缀触发。 */
+    function tryDirectInstall() {
+      if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
+      var nav = null;
+      try {
+        var b = new Blob([installCode], { type: 'text/javascript;charset=utf-8' });
+        nav = URL.createObjectURL(b);
+      } catch (e) { nav = null; }
+      if (!nav) {
+        // 兜底：data: 也可能在某些内核放行
+        nav = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(installCode);
+      }
+      var target = nav + '#' + encodeURIComponent(installName || 'script.user.js');
+      msg('正在跳转，若未出现安装提示请用下方其他方式');
+      setTimeout(function () {
+        try { location.href = target; } catch (e) {
+          try { var w2 = window.open(target, '_blank'); if (w2) { msg('已尝试新窗口安装'); } } catch (e2) { msg('跳转被拦截，请用下载或复制方式'); }
+        }
+      }, 300);
+    }
+
+    /* 下载：优先 blob（可指定文件名），失败回退 data: */
     function downloadUserScript() {
+      var done = false;
       try {
         var b = new Blob([installCode], { type: 'text/javascript;charset=utf-8' });
         var u = URL.createObjectURL(b);
         var a = document.createElement('a');
         a.href = u; a.download = installName; a.style.display = 'none';
         document.body.appendChild(a); a.click();
+        done = true;
         setTimeout(function () {
           try { document.body.removeChild(a); } catch (e) {}
           try { URL.revokeObjectURL(u); } catch (e) {}
         }, 800);
-        msg('已下载 ' + installName + '，用 ChromeXt 导入该文件即可安装');
-      } catch (e) { msg('下载失败，请改用复制方式'); }
+      } catch (e) { done = false; }
+      if (!done) {
+        try {
+          var a2 = document.createElement('a');
+          a2.href = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(installCode);
+          a2.download = installName; a2.style.display = 'none';
+          document.body.appendChild(a2); a2.click();
+          setTimeout(function () { try { document.body.removeChild(a2); } catch (e) {} }, 500);
+        } catch (e2) { msg('下载失败，请改用复制方式'); return; }
+      }
+      msg('已下载到 Download 目录：' + installName + '。之后：文件管理器长按它 → 打开方式 → ChromeXt；或在浏览器地址栏输入 file:///sdcard/Download/' + installName);
     }
 
     function runJs() {
@@ -529,6 +568,7 @@
       copyText(installCode, function (ok) { msg(ok ? '已复制到剪贴板' : '复制失败，请长按代码手动复制'); });
     };
     $('fv-dl').onclick = downloadUserScript;
+    $('fv-direct').onclick = tryDirectInstall;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
@@ -638,6 +678,7 @@
     '<div id="fv-inst">' +
       '<div class="ih">' +
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
+        '<button class="btn" id="fv-direct">⚡ 尝试一键安装</button>' +
         '<button class="btn" id="fv-copy">📋 复制代码</button>' +
         '<button class="btn sec" id="fv-dl">⬇️ 下载 .user.js</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
