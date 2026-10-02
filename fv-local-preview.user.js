@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         FV 本地文件预览器（固定入口·安装脚本版）
+// @name         FV 本地文件预览器（固定入口·全屏修复·多格式版）
 // @namespace    com.example.fv
-// @version      5.0
-// @description  固定入口 https://fv-local-preview.invalid/ ；支持 html/json/md/js/pdf/mhtml/mht/svg/xml/xsl/xslt/xhtml/xht/txt 预览、全屏打开，并可将 js 生成/导出为 ChromeXt 用户脚本
+// @version      6.0
+// @description  固定入口 https://fv-local-preview.invalid/ ；全屏改为页内覆盖层（不再用 data: 顶层导航），修复白屏；支持 html/xml/svg/json/md/js/pdf/mhtml/图片/音视频/csv/txt 等
 // @match        https://fv-local-preview.invalid/*
 // @run-at       document-start
 // @grant        none
@@ -14,18 +14,22 @@
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
   /* ============================================================
-     工具页脚本（普通函数写法，最后用 toString 注入，避免双重转义）
+     工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
      注意：函数体内不能出现字面的 </script>
   ============================================================ */
   function toolScript() {
     var $ = function (i) { return document.getElementById(i); };
     var fileInput = $('fv-file'), pick = $('fv-name'), frame = $('fv-frame'),
-        preBox = $('fv-pre'), mdBox = $('fv-md'), toast = $('fv-toast'),
-        fab = $('fv-fab'), mask = $('fv-mask'), card = $('fv-card');
+        preBox = $('fv-pre'), mdBox = $('fv-md'), mediaBox = $('fv-media'),
+        toast = $('fv-toast'), fab = $('fv-fab'), mask = $('fv-mask'), card = $('fv-card'),
+        instPanel = $('fv-inst'), instCode = $('fv-inst-code'), instTip = $('fv-inst-tip'),
+        overlay = $('fv-overlay'), ovFrame = $('fv-ov-frame'), ovTip = $('fv-ov-tip'),
+        ovDl = $('fv-ov-dl');
 
-    var lastText = '', lastName = '', lastKind = '', lastBlob = null;
+    var lastText = '', lastName = '', lastKind = '', lastFile = null, lastBlob = null;
     var S1 = '<' + 'script>', S2 = '<' + '/script>';
 
+    /* ---------- 基础 ---------- */
     function msg(s, ms) {
       if (!toast) return;
       toast.textContent = s;
@@ -36,32 +40,108 @@
     function esc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
+    function ext() {
+      var a = String(lastName).split('.');
+      return a.length > 1 ? a.pop().toLowerCase() : '';
+    }
     function hideAll() {
       frame.style.display = 'none';
       preBox.style.display = 'none';
       mdBox.style.display = 'none';
+      mediaBox.style.display = 'none';
     }
-    function readFile(f) {
+    function showPre(html) { hideAll(); preBox.style.display = 'block'; preBox.innerHTML = html; }
+    function showMd(html) { hideAll(); mdBox.style.display = 'block'; mdBox.innerHTML = html; }
+    function showFrameSrc(t) { hideAll(); frame.style.display = 'block'; frame.removeAttribute('sandbox'); frame.srcdoc = t; }
+    function showFrameBlob(url) { hideAll(); frame.style.display = 'block'; frame.removeAttribute('sandbox'); frame.src = url; }
+
+    function newBlob(f, type) {
+      try {
+        if (lastBlob) { try { URL.revokeObjectURL(lastBlob); } catch (e) {} }
+        lastBlob = URL.createObjectURL(type ? new Blob([f], { type: type }) : f);
+        return lastBlob;
+      } catch (e) {
+        lastBlob = null;
+        return null;
+      }
+    }
+
+    /* ---------- 读取与编码识别 ---------- */
+    function readArrayBuffer(f) {
       return new Promise(function (res, rej) {
-        if (f.text) { f.text().then(res).catch(rej); return; }
+        if (f.arrayBuffer) { f.arrayBuffer().then(res).catch(rej); return; }
         var r = new FileReader();
         r.onload = function () { res(r.result); };
         r.onerror = function () { rej(r.error); };
-        r.readAsText(f);
+        r.readAsArrayBuffer(f);
       });
     }
-    function ext() {
-      var a = lastName.split('.');
-      return a.length > 1 ? a.pop().toLowerCase() : '';
+    function decodeText(buf) {
+      var bytes = new Uint8Array(buf);
+      if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return td('utf-8', bytes.subarray(3));
+      if (bytes[0] === 0xFF && bytes[1] === 0xFE) return td('utf-16le', bytes.subarray(2));
+      if (bytes[0] === 0xFE && bytes[1] === 0xFF) return td('utf-16be', bytes.subarray(2));
+      try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) {}
+      var probe = '';
+      try { probe = new TextDecoder('utf-8').decode(bytes.slice(0, 4096)); } catch (e) {}
+      var m = probe.match(/charset\s*=\s*["']?\s*([\w-]+)/i);
+      if (m) { try { return td(m[1], bytes); } catch (e) {} }
+      var tries = ['gbk', 'gb18030', 'big5', 'shift_jis', 'euc-kr', 'iso-8859-1'];
+      for (var i = 0; i < tries.length; i++) { try { return td(tries[i], bytes); } catch (e) {} }
+      return td('utf-8', bytes);
     }
-    function showFrame() { hideAll(); frame.style.display = 'block'; frame.removeAttribute('sandbox'); }
-    function showPre(html) { hideAll(); preBox.style.display = 'block'; preBox.innerHTML = html; }
-    function showMd(html) { hideAll(); mdBox.style.display = 'block'; mdBox.innerHTML = html; }
+    function td(enc, bytes) { return new TextDecoder(enc).decode(bytes); }
 
-    /* ---------- HTML / XML / SVG / XSL ---------- */
-    function renderHtml(t) { lastKind = 'html'; showFrame(); frame.srcdoc = t; msg('已打开：' + lastName); }
+    /* ---------- 全屏覆盖层（替代 window.open / data: 顶层导航） ---------- */
+    function openFull(html, blobUrl, tip, dlName) {
+      hideAll();
+      overlay.style.display = 'flex';
+      ovTip.style.display = tip ? 'block' : 'none';
+      ovTip.textContent = tip || '';
+      if (blobUrl) {
+        ovDl.style.display = dlName ? 'inline-block' : 'none';
+        if (dlName) { ovDl.setAttribute('data-name', dlName); }
+        try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
+        ovFrame.src = blobUrl;
+      } else {
+        ovDl.style.display = 'none';
+        try { ovFrame.removeAttribute('src'); } catch (e) {}
+        ovFrame.srcdoc = html || '';
+      }
+    }
+    function closeFull() {
+      overlay.style.display = 'none';
+      try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
+      try { ovFrame.src = 'about:blank'; } catch (e) {}
+    }
+    function backBtn() {
+      return '<button onclick="(window.parent&&window.parent.__fvClose)?window.parent.__fvClose():history.back()" style="position:fixed;top:10px;right:10px;z-index:9999999;padding:8px 14px;background:rgba(47,125,99,.92);color:#fff;border:0;border-radius:20px;font:14px system-ui;cursor:pointer">← 返回</button>';
+    }
+    function wrapDoc(body, title) {
+      return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
+        esc(title || 'FV预览') + '</title><style>html,body{margin:0}body{background:#fff;font:14px/1.6 system-ui;padding:12px}</style></head><body>' +
+        backBtn() + body + '</body></html>';
+    }
+    window.__fvClose = closeFull;
 
-    /* ---------- JSON ---------- */
+    /* ---------- 各类渲染 ---------- */
+    function renderHtml(t) { lastKind = 'html'; showFrameSrc(t); msg('已打开：' + lastName + '（相对路径资源可能加载失败）'); }
+
+    function renderXml(t) {
+      lastKind = 'xml';
+      var isXsl = ext() === 'xsl' || ext() === 'xslt';
+      showFrameSrc(t);
+      msg('已打开：' + lastName + (isXsl ? '（XSL/XSLT 以源码树显示）' : ''));
+    }
+
+    function renderSvg(f, t) {
+      lastKind = 'svg';
+      var url = newBlob(new Blob([t], { type: 'image/svg+xml;charset=utf-8' }));
+      if (!url) { renderCode(t); msg('无法创建预览链接，已按源码显示'); return; }
+      showFrameBlob(url);
+      msg('已打开：' + lastName);
+    }
+
     function renderJson(t) {
       lastKind = 'json';
       var out;
@@ -77,7 +157,6 @@
         }));
     }
 
-    /* ---------- Markdown ---------- */
     function mdInline(s) {
       s = s.replace(/`([^`]+)`/g, function (m, c) { return '<code>' + esc(c) + '</code>'; });
       s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
@@ -113,95 +192,217 @@
     }
     function renderMd(t) { lastKind = 'md'; showMd(mdToHtml(t)); msg('已渲染：' + lastName); }
 
-    /* ---------- 代码高亮 ---------- */
     function codeHtml(t) {
       var s = esc(t);
-      s = s.replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, '<span class="cc">$1</span>');
+      s = s.replace(/(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)/g, '<span class="cc">$1</span>');
       s = s.replace(/(&quot;[^&]*?&quot;|'[^']*?'|`[^`]*?`)/g, '<span class="cs">$1</span>');
-      s = s.replace(/\b(const|let|var|function|return|if|else|for|while|new|class|async|await|import|export|try|catch)\b/g, '<span class="ck">$1</span>');
+      s = s.replace(/\b(const|let|var|function|return|if|else|for|while|new|class|async|await|import|export|try|catch|public|private|static|void|int|string)\b/g, '<span class="ck">$1</span>');
       s = s.replace(/\b(true|false|null|undefined)\b/g, '<span class="cn">$1</span>');
       return s;
     }
-    function renderCode(t) { lastKind = 'code'; showPre(codeHtml(t)); msg('已高亮：' + lastName + '，可点菜单安装为脚本'); }
+    function renderCode(t) { lastKind = 'code'; showPre(codeHtml(t)); msg('已高亮：' + lastName); }
 
-    /* ---------- PDF / MHTML ---------- */
-    function renderBlob(f) {
-      lastKind = 'blob';
-      if (lastBlob) { URL.revokeObjectURL(lastBlob); }
-      lastBlob = URL.createObjectURL(f);
-      showFrame(); frame.src = lastBlob;
-      msg('已打开：' + f.name);
+    function renderCsv(t) {
+      lastKind = 'csv';
+      var delim = ext() === 'tsv' ? '\t' : ',';
+      var rows = t.replace(/\r\n/g, '\n').split('\n').filter(function (r) { return r.length; });
+      var html = '<table style="border-collapse:collapse;font:13px system-ui;width:100%">';
+      rows.slice(0, 500).forEach(function (r, ri) {
+        var cells = r.split(delim);
+        html += '<tr>' + cells.map(function (c) {
+          var st = 'border:1px solid #e5e7eb;padding:6px 8px;' + (ri === 0 ? 'background:#f0f4f8;font-weight:600;' : '');
+          return '<td style="' + st + '">' + esc(c) + '</td>';
+        }).join('') + '</tr>';
+      });
+      html += '</table>';
+      if (rows.length > 500) html += '<p style="color:#888">仅显示前 500 行</p>';
+      hideAll();
+      preBox.style.display = 'block';
+      preBox.innerHTML = html;
+      msg('已渲染表格：' + lastName + '（' + rows.length + ' 行）');
+    }
+
+    /* ---------- 媒体 ---------- */
+    function renderMedia(f, kind) {
+      lastKind = kind;
+      hideAll();
+      mediaBox.style.display = 'flex';
+      mediaBox.innerHTML = '';
+      var url = newBlob(f);
+      if (!url) {
+        mediaBox.innerHTML = '<div style="color:#a33;font:14px system-ui">无法创建预览链接（浏览器不支持 Blob URL）</div>';
+        msg('无法预览此媒体文件');
+        return;
+      }
+      var el;
+      if (kind === 'image') {
+        el = document.createElement('img');
+        el.src = url;
+        el.style.maxWidth = '100%'; el.style.maxHeight = '100%';
+      } else if (kind === 'audio') {
+        el = document.createElement('audio');
+        el.src = url; el.controls = true; el.style.width = '80%';
+      } else {
+        el = document.createElement('video');
+        el.src = url; el.controls = true;
+        el.style.maxWidth = '100%'; el.style.maxHeight = '100%';
+      }
+      mediaBox.appendChild(el);
+      msg('已打开：' + lastName);
+    }
+
+    /* ---------- PDF ---------- */
+    function renderPdf(f) {
+      lastKind = 'pdf';
+      hideAll();
+      mediaBox.style.display = 'flex';
+      mediaBox.innerHTML = '';
+      var url = newBlob(f, 'application/pdf');
+      if (!url) {
+        mediaBox.innerHTML = '<div style="color:#a33;font:14px system-ui">无法创建预览链接</div>';
+        msg('无法预览此 PDF');
+        return;
+      }
+      var box = document.createElement('div');
+      box.style.cssText = 'text-align:center;color:#555;font:14px system-ui;padding:20px';
+      box.innerHTML = '<div style="font-size:40px">📕</div>' +
+        '<div style="margin:10px 0">' + esc(f.name) + '</div>' +
+        '<div style="color:#888;font-size:13px;margin-bottom:14px">' + (f.size / 1024).toFixed(1) + ' KB</div>';
+      var a = document.createElement('a');
+      a.href = url; a.download = f.name;
+      a.textContent = '⬇️ 下载此 PDF';
+      a.style.cssText = 'display:inline-block;padding:8px 16px;background:#2f7d63;color:#fff;border-radius:8px;text-decoration:none;margin:4px';
+      var b = document.createElement('button');
+      b.textContent = '🖥️ 尝试内嵌预览';
+      b.style.cssText = 'padding:8px 16px;background:#607d8b;color:#fff;border:0;border-radius:8px;margin:4px';
+      b.onclick = function () {
+        openFull('', url, '若下方空白，说明当前浏览器内核不支持内嵌 PDF，请用系统 PDF 应用打开下载的文件。', f.name);
+      };
+      box.appendChild(a); box.appendChild(b);
+      mediaBox.appendChild(box);
+      msg('PDF 已就绪：多数 WebView 不支持内嵌预览，建议下载后打开');
+    }
+
+    /* ---------- MHTML 解析 ---------- */
+    function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function qpDecode(s) {
+      return s.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g, function (m, h) {
+        return String.fromCharCode(parseInt(h, 16));
+      });
+    }
+    function b64ToBytes(b64) {
+      var bin = atob(b64.replace(/\s/g, ''));
+      var arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return arr;
+    }
+    function parseMhtml(text) {
+      var m = text.match(/boundary\s*=\s*"?([^";\r\n]+)"?/i);
+      if (!m) return null;
+      var b = m[1].replace(/^["']|["']$/g, '');
+      var parts = text.split(new RegExp('--' + escapeRe(b)));
+      var best = null;
+      for (var i = 0; i < parts.length; i++) {
+        var p = parts[i];
+        if (!p || p.trim().indexOf('--') === 0) continue;
+        var idx = p.search(/\r?\n\r?\n/);
+        if (idx < 0) continue;
+        var head = p.slice(0, idx), body = p.slice(idx).replace(/^\r?\n\r?\n/, '');
+        if (!/content-type\s*:\s*text\/html/i.test(head)) continue;
+        var cte = (head.match(/content-transfer-encoding\s*:\s*(\S+)/i) || [])[1] || '';
+        var cs = (head.match(/charset\s*=\s*"?([^";\r\n]+)"?/i) || [])[1] || 'utf-8';
+        var out;
+        try {
+          if (/base64/i.test(cte)) out = td(cs, b64ToBytes(body));
+          else if (/quoted-printable/i.test(cte)) out = qpDecode(body);
+          else out = body;
+        } catch (e) { out = body; }
+        if (out && out.length > (best ? best.length : 0)) best = out;
+      }
+      return best;
+    }
+    function renderMhtml(t) {
+      var html = parseMhtml(t);
+      if (html) {
+        lastKind = 'html';
+        lastText = html;
+        showFrameSrc(html);
+        msg('已解析 MHTML 并渲染网页（资源仍可能缺失）');
+      } else {
+        lastKind = 'code';
+        showPre(esc(t).slice(0, 60000));
+        msg('MHTML 解析失败（未找到 HTML 主体），显示原文');
+      }
     }
 
     /* ---------- 路由 ---------- */
+    var IMG = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif', 'heic'];
+    var AUD = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'];
+    var VID = ['mp4', 'webm', 'm4v', '3gp', 'ogv'];
+
     function route(f, t) {
       var e = ext(), tr = (t || '').trim();
-      if (e === 'pdf') { renderBlob(f); return; }
-      if (e === 'mhtml' || e === 'mht') { renderBlob(f); return; }
-      if (e === 'svg' || e === 'xml' || e === 'xsl' || e === 'xslt' ||
-          e === 'xhtml' || e === 'xht' || e === 'html' || e === 'htm') { renderHtml(t); return; }
+      if (IMG.indexOf(e) >= 0) { renderMedia(f, 'image'); return; }
+      if (AUD.indexOf(e) >= 0) { renderMedia(f, 'audio'); return; }
+      if (VID.indexOf(e) >= 0) { renderMedia(f, 'video'); return; }
+      if (e === 'pdf') { renderPdf(f); return; }
+      if (e === 'mhtml' || e === 'mht') { renderMhtml(t); return; }
+      if (e === 'svg') { renderSvg(f, t); return; }
+      if (e === 'xml' || e === 'xsl' || e === 'xslt') { renderXml(t); return; }
       if (e === 'json' || /^\s*[[{]/.test(tr)) { renderJson(t); return; }
       if (e === 'md' || e === 'markdown') { renderMd(t); return; }
+      if (e === 'csv' || e === 'tsv') { renderCsv(t); return; }
       if (e === 'js' || e === 'mjs' || /^\s*(const|let|var|function|class|async|import|export)\s/.test(tr)) { renderCode(t); return; }
-      if (/^\s*<(!DOCTYPE|html|\?xml)/i.test(tr)) { renderHtml(t); return; }
+      if (e === 'html' || e === 'htm' || e === 'xhtml' || e === 'xht' || /^\s*<(!DOCTYPE|html|\?xml)/i.test(tr)) { renderHtml(t); return; }
       renderCode(t);
     }
 
-    /* ---------- 全屏 ---------- */
-    function backBtn() {
-      return '<button onclick="history.length>1?history.back():void 0" style="position:fixed;top:10px;right:10px;z-index:9999999;padding:8px 14px;background:rgba(47,125,99,.92);color:#fff;border:0;border-radius:20px;font:14px system-ui;cursor:pointer">← 返回</button>';
-    }
-    function wrapDoc(body, title) {
-      return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
-        esc(title || 'FV预览') + '</title><style>body{background:#fff;font:14px/1.6 system-ui;padding:10px}</style></head><body>' +
-        backBtn() + body + '</body></html>';
-    }
-    function openData(html) {
-      var u = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
-      var w = window.open(u, '_blank');
-      if (!w) { msg('弹窗被拦截，已在本页 iframe 打开'); showFrame(); frame.srcdoc = html; }
-    }
+    /* ---------- 全屏（统一入口） ---------- */
     function fullOpen() {
-      if (!lastText && !lastBlob) { msg('请先选择文件'); return; }
+      if (!lastFile) { msg('请先选择文件'); return; }
       var e = ext();
-      if (lastKind === 'blob' && lastBlob) {
-        var w = window.open(lastBlob, '_blank');
-        if (!w) msg('弹窗被拦截');
+      if (lastKind === 'image' || lastKind === 'audio' || lastKind === 'video') {
+        if (!lastBlob) { msg('当前环境无法全屏预览此媒体'); return; }
+        openFull('', lastBlob, '', lastName);
+        return;
+      }
+      if (lastKind === 'pdf') {
+        if (!lastBlob) { msg('当前环境无法内嵌 PDF，请用下载按钮保存后打开'); return; }
+        openFull('', lastBlob, '若下方空白，说明内核不支持内嵌 PDF。', lastName);
         return;
       }
       if (lastKind === 'md') {
-        openData(wrapDoc('<article style="max-width:760px;margin:0 auto">' + mdToHtml(lastText) + '</article>', lastName));
+        openFull(wrapDoc('<article style="max-width:760px;margin:0 auto">' + mdToHtml(lastText) + '</article>', lastName));
+        return;
+      }
+      if (lastKind === 'csv') {
+        openFull(wrapDoc('<div style="overflow:auto">' + preBox.innerHTML + '</div>', lastName));
         return;
       }
       if (lastKind === 'json') {
         var o;
         try { o = JSON.stringify(JSON.parse(lastText), null, 2); } catch (err) { o = lastText; }
-        openData(wrapDoc('<pre style="white-space:pre-wrap;font:13px Consolas,monospace">' + esc(o) + '</pre>', lastName));
+        openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px Consolas,monospace">' + esc(o) + '</pre>', lastName));
         return;
       }
       if (e === 'js' || e === 'mjs') {
         var safe = String(lastText).replace(/<\/script>/gi, '<\\/script>');
-        openData('<!doctype html><html><head><meta charset="utf-8"><style>body{background:#fff;font:14px system-ui;padding:16px}</style></head><body>' +
+        openFull('<!doctype html><html><head><meta charset="utf-8"><style>body{background:#fff;font:14px system-ui;padding:16px}</style></head><body>' +
           backBtn() + '<div id="fv-app"></div>' +
           S1 + 'try{' + safe + '}catch(err){document.body.insertAdjacentHTML("beforeend","<pre style=color:red>Error: "+err.message+"</pre>")}' + S2 +
           '</body></html>');
+        msg('已全屏运行 JS');
         return;
       }
-      openData(wrapDoc(lastText, lastName));
+      openFull(wrapDoc(lastText, lastName));
     }
 
-    /* ============================================================
-       安装为 ChromeXt 用户脚本（核心）
-    ============================================================ */
-    var instPanel = $('fv-inst'), instCode = $('fv-inst-code'), instTip = $('fv-inst-tip');
+    /* ---------- 安装为 ChromeXt 脚本 ---------- */
     var installCode = '', installName = '';
-
-    function hasUserScriptHead(src) {
-      return /^\s*\/\/\s*==UserScript==/.test(src);
-    }
+    function hasHead(src) { return /^\s*\/\/\s*==UserScript==/.test(src); }
     function buildUserScript(src, name) {
-      if (hasUserScriptHead(src)) return src;
-      var base = String(name).replace(/\.(js|mjs)$/i, '') || 'fv-script';
+      if (hasHead(src)) return src;
+      var base = String(name).replace(/\.(js|mjs|user\.js)$/i, '') || 'fv-script';
       return '// ==UserScript==\n' +
         '// @name         ' + base + '\n' +
         '// @namespace    com.example.fv\n' +
@@ -216,8 +417,7 @@
       function fb() {
         try {
           var ta = document.createElement('textarea');
-          ta.value = t;
-          ta.style.position = 'fixed'; ta.style.top = '-1000px';
+          ta.value = t; ta.style.position = 'fixed'; ta.style.top = '-1000px';
           document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
           var ok = false;
           try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
@@ -233,51 +433,29 @@
     }
     function openInstall() {
       if (!lastText) { msg('请先选择 js 文件'); return; }
-      var e = ext();
-      if (e !== 'js' && e !== 'mjs' && !hasUserScriptHead(lastText)) {
-        msg('当前不是 js 文件，仍可按脚本内容导出');
-      }
       installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
-      instTip.textContent = hasUserScriptHead(lastText)
-        ? '检测到标准 UserScript 头，可原样安装。方式①：复制 → ChromeXt 新建脚本粘贴保存。方式②：下载 .user.js → 用 ChromeXt 打开安装。'
-        : '已自动补 UserScript 头（@match *://*/*）。建议先改成你要生效的网址再安装。方式①：复制 → ChromeXt 新建脚本粘贴保存。方式②：下载 .user.js → 用 ChromeXt 打开安装。';
+      instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
+        ' 安装方式：① 复制 → ChromeXt 新建脚本粘贴保存；② 下载 .user.js → 用 ChromeXt「从文件导入」打开安装。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
     }
-    function closeInstall() { instPanel.style.display = 'none'; }
-
     function downloadUserScript() {
       try {
         var b = new Blob([installCode], { type: 'text/javascript;charset=utf-8' });
         var u = URL.createObjectURL(b);
         var a = document.createElement('a');
-        a.href = u; a.download = installName;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
+        a.href = u; a.download = installName; a.style.display = 'none';
+        document.body.appendChild(a); a.click();
         setTimeout(function () {
           try { document.body.removeChild(a); } catch (e) {}
           try { URL.revokeObjectURL(u); } catch (e) {}
         }, 800);
-        msg('已触发下载：' + installName + '，下载完成后用 ChromeXt 打开该文件即可安装');
-      } catch (e) {
-        msg('下载失败：' + e.message + '，请改用复制方式');
-      }
-    }
-    function tryOpenInstallLink() {
-      try {
-        var u = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(installCode);
-        var w = window.open(u, '_blank');
-        if (!w) location.href = u;
-        msg('已尝试打开安装链接；若未出现安装界面，请用复制或下载方式');
-      } catch (e) {
-        msg('打开失败，请用复制或下载方式');
-      }
+        msg('已下载 ' + installName + '，用 ChromeXt 导入该文件即可安装');
+      } catch (e) { msg('下载失败，请改用复制方式'); }
     }
 
-    /* ---------- 临时试运行（当前页，非安装） ---------- */
     function runJs() {
       if (!lastText) { msg('请先选择文件'); return; }
       var logs = [];
@@ -289,12 +467,11 @@
       try {
         var fn = new Function('console', lastText);
         fn.call(window, fake);
-        if (logs.length) msg('试运行输出：' + logs.join(' | ').slice(0, 90));
-        else msg('试运行完成（无 console 输出）');
+        msg(logs.length ? '试运行输出：' + logs.join(' | ').slice(0, 90) : '试运行完成（无 console 输出）');
       } catch (err) { msg('运行出错：' + err.message); }
     }
 
-    /* ---------- 悬浮菜单 ---------- */
+    /* ---------- 菜单 ---------- */
     function openMenu() {
       if (mask.classList.contains('on')) { mask.classList.remove('on'); return; }
       var items = [
@@ -304,7 +481,7 @@
         { t: '🧪 临时试运行（不安装）', f: runJs },
         { t: '🌐 网页模式渲染', f: function () { if (lastText) renderHtml(lastText); else msg('请先选择文件'); } },
         { t: '📝 代码高亮查看', f: function () { if (lastText) renderCode(lastText); else msg('请先选择文件'); } },
-        { t: '🏠 回到首页', f: function () { location.href = 'https://fv-local-preview.invalid/'; } },
+        { t: '↩ 返回首页', f: function () { location.href = 'https://fv-local-preview.invalid/'; } },
         { t: '✕ 关闭菜单', f: function () {}, c: 1 }
       ];
       card.innerHTML = '';
@@ -325,18 +502,25 @@
     fileInput.addEventListener('change', function (ev) {
       var f = ev.target.files[0];
       if (!f) return;
-      lastName = f.name;
+      lastFile = f; lastName = f.name;
       pick.textContent = '📄 ' + f.name;
       var e = ext();
-      if (e === 'pdf' || e === 'mhtml' || e === 'mht') { route(f, ''); return; }
-      readFile(f).then(function (t) { lastText = t; route(f, t); })
-        .catch(function () { msg('读取失败'); });
+      if (IMG.indexOf(e) >= 0 || AUD.indexOf(e) >= 0 || VID.indexOf(e) >= 0) {
+        renderMedia(f, IMG.indexOf(e) >= 0 ? 'image' : (AUD.indexOf(e) >= 0 ? 'audio' : 'video'));
+        return;
+      }
+      if (e === 'pdf') { renderPdf(f); return; }
+      if (f.size > 12 * 1024 * 1024) { msg('文件较大（' + (f.size / 1048576).toFixed(1) + 'MB），读取可能较慢'); }
+      readArrayBuffer(f).then(function (buf) {
+        lastText = decodeText(buf);
+        route(f, lastText);
+      }).catch(function () { msg('读取失败'); });
     });
 
     $('fv-full').onclick = fullOpen;
     $('fv-reload').onclick = function () {
-      if (lastText) route({ name: lastName }, lastText);
-      else if (lastBlob) { showFrame(); frame.src = lastBlob; }
+      if (lastText) route(lastFile, lastText);
+      else if (lastFile) route(lastFile, '');
       else msg('请先选择文件');
     };
     $('fv-home').onclick = function () { location.href = 'https://fv-local-preview.invalid/'; };
@@ -345,8 +529,17 @@
       copyText(installCode, function (ok) { msg(ok ? '已复制到剪贴板' : '复制失败，请长按代码手动复制'); });
     };
     $('fv-dl').onclick = downloadUserScript;
-    $('fv-openlink').onclick = tryOpenInstallLink;
-    $('fv-inst-close').onclick = closeInstall;
+    $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
+    $('fv-ov-close').onclick = closeFull;
+    ovDl.onclick = function () {
+      try {
+        var a = document.createElement('a');
+        a.href = lastBlob; a.download = ovDl.getAttribute('data-name') || lastName || 'file';
+        a.style.display = 'none';
+        document.body.appendChild(a); a.click();
+        setTimeout(function () { try { document.body.removeChild(a); } catch (e) {} }, 500);
+      } catch (e) { msg('下载失败'); }
+    };
 
     preBox.ondblclick = function () { var e = ext(); if (e === 'js' || e === 'mjs') openInstall(); };
     fab.onclick = function (e) { e.stopPropagation(); openMenu(); };
@@ -387,6 +580,7 @@
     '#fv-frame{width:100%;height:100%;border:0;background:#fff;display:none}' +
     '#fv-pre{margin:0;padding:14px;width:100%;height:100%;overflow:auto;white-space:pre-wrap;background:#fafafa;color:#333;font:13px/1.6 "SFMono-Regular",Consolas,monospace;display:none}' +
     '#fv-md{padding:18px 22px;width:100%;height:100%;overflow:auto;background:#fff;display:none}' +
+    '#fv-media{width:100%;height:100%;display:none;align-items:center;justify-content:center;background:#fff;padding:12px;overflow:auto}' +
     '#fv-md h1,#fv-md h2,#fv-md h3,#fv-md h4{color:#1f2d3d;margin:16px 0 8px}' +
     '#fv-md h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
     '#fv-md p{margin:8px 0}' +
@@ -413,16 +607,19 @@
     '.mi:active{transform:scale(.97)}' +
     '.mi.close{background:#fdecec;color:#c0392b}' +
     '#fv-inst{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
-    '#fv-inst .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04)}' +
+    '#fv-inst .ih,#fv-overlay .oh{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
     '#fv-inst .tip{padding:8px 12px;color:#666;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
     '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text}' +
+    '#fv-overlay{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column}' +
+    '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
+    '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
     '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
 
   var BODY =
     '<div class="head">' +
       '<span class="title">📂 FV 本地预览</span>' +
       '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
-        '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.json,.md,.markdown,.js,.mjs,.user.js,.pdf,.mhtml,.mht,.svg,.xml,.xsl,.xslt,.txt">' +
+        '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
       '</span>' +
       '<button class="btn" id="fv-inst-btn">📦 安装脚本</button>' +
       '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
@@ -433,6 +630,7 @@
       '<iframe id="fv-frame"></iframe>' +
       '<pre id="fv-pre"></pre>' +
       '<div id="fv-md"></div>' +
+      '<div id="fv-media"></div>' +
     '</div>' +
     '<div id="fv-toast"></div>' +
     '<div id="fv-fab">FV</div>' +
@@ -442,15 +640,23 @@
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
         '<button class="btn" id="fv-copy">📋 复制代码</button>' +
         '<button class="btn sec" id="fv-dl">⬇️ 下载 .user.js</button>' +
-        '<button class="btn sec" id="fv-openlink">🔗 打开安装链接</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-inst-tip"></div>' +
       '<div id="fv-inst-code"></div>' +
+    '</div>' +
+    '<div id="fv-overlay">' +
+      '<div class="oh">' +
+        '<span class="title">🖥️ 全屏预览</span>' +
+        '<button class="btn" id="fv-ov-dl" style="display:none">⬇️ 下载</button>' +
+        '<button class="btn ghost" id="fv-ov-close">✕ 退出全屏</button>' +
+      '</div>' +
+      '<div id="fv-ov-tip"></div>' +
+      '<iframe id="fv-ov-frame"></iframe>' +
     '</div>';
 
   /* ============================================================
-     注入：DOM 替换 + 多重重试（错误页会被 WebView 二次提交）
+     注入：DOM 替换 + 多重重试
   ============================================================ */
   function build() {
     try {
