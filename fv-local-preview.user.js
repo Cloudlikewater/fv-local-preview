@@ -441,13 +441,15 @@
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
       instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
-        ' 推荐顺序：① 尝试一键安装 → ② 下载后在文件管理器用 ChromeXt 打开 → ③ 复制粘贴。';
+        ' 推荐：① 点「尝试一键安装」→ 页面显示脚本源码后，长按页面 → ChromeXt 菜单里选 Install UserScript；' +
+        '② 下载 .user.js → 文件管理器长按它 → 打开方式选 ChromeXt；③ 复制粘贴。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
     }
 
-    /* 一键安装：ChromeXt 识别「以 .user.js 结尾的 URL」并弹安装提示。
-       Chrome 只禁用 data: 顶层导航，blob: 可以导航，因此用 blob + #xxx.user.js 后缀触发。 */
+    /* 一键安装：ChromeXt 靠「URL 以 .user.js 结尾」识别脚本。
+       Chrome 只禁用 data: 顶层导航，blob: 可导航，故 blob + #xxx.user.js。
+       即使不自动弹窗，页面也已变成脚本源码，此时长按用 ChromeXt 的 Install UserScript 菜单即可安装。 */
     function tryDirectInstall() {
       if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
       var nav = null;
@@ -456,16 +458,23 @@
         nav = URL.createObjectURL(b);
       } catch (e) { nav = null; }
       if (!nav) {
-        // 兜底：data: 也可能在某些内核放行
         nav = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(installCode);
       }
       var target = nav + '#' + encodeURIComponent(installName || 'script.user.js');
-      msg('正在跳转，若未出现安装提示请用下方其他方式');
+      msg('已跳到脚本源码页；没弹安装提示就长按页面 → ChromeXt 菜单 → Install UserScript');
       setTimeout(function () {
         try { location.href = target; } catch (e) {
           try { var w2 = window.open(target, '_blank'); if (w2) { msg('已尝试新窗口安装'); } } catch (e2) { msg('跳转被拦截，请用下载或复制方式'); }
         }
       }, 300);
+    }
+
+    /* 复制 file:// 路径：给能正常渲染 file:// 的浏览器（如打了补丁的 Chrome）用，
+       在地址栏打开这个 URL，ChromeXt 会因 .user.js 后缀弹安装提示。 */
+    function copyFilePath() {
+      if (!installName) { msg('请先点「安装脚本」生成'); return; }
+      var p = 'file:///sdcard/Download/' + installName;
+      copyText(p, function (ok) { msg(ok ? '已复制 ' + p : '复制失败，请手动记下：' + p); });
     }
 
     /* 下载：优先 blob（可指定文件名），失败回退 data: */
@@ -569,6 +578,7 @@
     };
     $('fv-dl').onclick = downloadUserScript;
     $('fv-direct').onclick = tryDirectInstall;
+    $('fv-path').onclick = copyFilePath;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
@@ -679,6 +689,7 @@
       '<div class="ih">' +
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
         '<button class="btn" id="fv-direct">⚡ 尝试一键安装</button>' +
+        '<button class="btn sec" id="fv-path">📋 复制 file:// 路径</button>' +
         '<button class="btn" id="fv-copy">📋 复制代码</button>' +
         '<button class="btn sec" id="fv-dl">⬇️ 下载 .user.js</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
