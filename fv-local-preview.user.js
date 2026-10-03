@@ -138,6 +138,10 @@
       overlay.style.display = 'none';
       try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
       try { ovFrame.src = 'about:blank'; } catch (e) {}
+      // 若地址被改成 .user.js 结尾，退出时还原，避免残留
+      try {
+        if (location.href.indexOf('.user.js') >= 0) history.replaceState(null, '', '/');
+      } catch (e) {}
     }
     function backBtn() {
       return '<button onclick="(window.parent&&window.parent.__fvClose)?window.parent.__fvClose():history.back()" style="position:fixed;top:10px;right:10px;z-index:9999999;padding:8px 14px;background:rgba(47,125,99,.92);color:#fff;border:0;border-radius:20px;font:14px system-ui;cursor:pointer">← 返回</button>';
@@ -507,8 +511,38 @@
       msg('已生成源码页，请长按页面使用 ChromeXt 菜单安装');
     }
 
-    /* 实验方案：ChromeXt 按 URL 结尾 .user.js 识别，但 blob 的路径是随机 UUID，
-       且 #fragment 不参与路径匹配，所以这条大概率无效，仅作尝试。 */
+    /* ★ 跳转 Install UserScript：用 history.pushState 把地址栏改成 .user.js 结尾，
+       页面不刷新（因此不会触发 DNS 失败、不会白屏）。ChromeXt 靠 onUpdateUrl 监听地址变化，
+       历史记录变更同样会触发，它看到 .user.js 结尾就会弹安装提示；
+       同时页面已渲染成脚本源码供其读取。pushState 不可用时回退到改 hash。 */
+    function pushStateInstall() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      installCode = buildUserScript(lastText, lastName);
+      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
+
+      var changed = false;
+      try {
+        history.pushState(null, '', '/' + encodeURIComponent(installName));
+        changed = location.href.indexOf('.user.js') >= 0;
+      } catch (e) { changed = false; }
+      if (!changed) {
+        try {
+          location.hash = encodeURIComponent(installName);
+          changed = location.href.indexOf('.user.js') >= 0;
+        } catch (e) { changed = false; }
+      }
+
+      renderInstallSourcePage();
+      if (changed) {
+        ovTip.textContent = '地址已改为 .user.js 结尾（页面未刷新）。若 ChromeXt 弹出安装提示，确认即可；' +
+          '装完点右上角「✕ 退出全屏」。没弹提示就长按页面空白处用 ChromeXt 菜单安装。';
+        msg('地址已切换为 .user.js，等待 ChromeXt 安装提示');
+      } else {
+        msg('无法修改地址，请长按源码页用 ChromeXt 菜单安装');
+      }
+    }
+
+    /* 兜底：blob 导航（多数情况无效，仅保留） */
     function tryDirectInstall() {
       if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
       var nav = null;
@@ -583,6 +617,7 @@
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '🖥️ 全屏打开', f: fullOpen },
         { t: '📥 Install UserScript（直接安装）', f: installViaChromeXt },
+        { t: '🚀 跳转 Install UserScript（改地址）', f: pushStateInstall },
         { t: '📦 安装为 ChromeXt 脚本', f: openInstall },
         { t: '🧪 临时试运行（不安装）', f: runJs },
         { t: '🌐 网页模式渲染', f: function () { if (lastText) renderHtml(lastText); else msg('请先选择文件'); } },
@@ -636,6 +671,7 @@
     };
     $('fv-dl').onclick = downloadUserScript;
     $('fv-direct').onclick = tryDirectInstall;
+    $('fv-jump').onclick = pushStateInstall;
     $('fv-srcpage').onclick = renderInstallSourcePage;
     $('fv-path').onclick = copyFilePath;
     $('fv-quick').onclick = installViaChromeXt;
@@ -751,7 +787,8 @@
         '<button class="btn" id="fv-srcpage">📄 打开脚本源码页（长按安装）</button>' +
         '<button class="btn" id="fv-quick">📥 Install UserScript（直接安装）</button>' +
 
-        '<button class="btn sec" id="fv-direct">⚡ 尝试跳转安装</button>' +
+        '<button class="btn" id="fv-jump">🚀 跳转 Install UserScript</button>' +
+        '<button class="btn sec" id="fv-direct">⚡ 兜底跳转（blob）</button>' +
         '<button class="btn sec" id="fv-path">📋 复制 file:// 路径</button>' +
         '<button class="btn" id="fv-copy">📋 复制代码</button>' +
         '<button class="btn sec" id="fv-dl">⬇️ 下载 .user.js</button>' +
