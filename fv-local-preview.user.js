@@ -466,11 +466,52 @@
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
       instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
-        ' 推荐：① 点「Install UserScript（直接安装）」一键装；' +
-        '② 点「打开脚本源码页」→ 长按页面 → ChromeXt 菜单选 Install UserScript；' +
-        '③ 下载 .user.js → 文件管理器长按它 → 打开方式选 ChromeXt；④ 复制粘贴。';
+        ' 说明：ChromeXt 作者已明确「导入 UserScript 未实现」，网页无法直接写入其脚本库。' +
+        ' 可行路径只有：① 分享文件给 ChromeXt（它声明能接收 JS 文件来安装）；' +
+        '② 复制后在 ChromeXt 新建脚本粘贴。其余按钮为实验性，多数版本无效。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
+    }
+
+    /* ★★ 分享安装（最有希望的一条）：
+       ChromeXt 官方 README 明确写了：The application ChromeXt is able to
+       received shared texts / open JavaScript files to install them as UserScripts.
+       网页可用 Web Share API Level 2 把 .user.js 文件直接分享给 ChromeXt，
+       由 ChromeXt 自己完成安装 —— 这是唯一「网页 → App」的真实通道，
+       不需要文件管理器、不需要长按菜单、不需要真实导航。 */
+    function shareInstall() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      installCode = buildUserScript(lastText, lastName);
+      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
+
+      var nav = navigator;
+      if (!nav.share || !nav.canShare) {
+        msg('当前浏览器不支持 Web Share（无法分享文件），请用复制方式');
+        return;
+      }
+      var file;
+      try {
+        file = new File([installCode], installName, { type: 'text/javascript' });
+      } catch (e) {
+        try { file = new Blob([installCode], { type: 'text/javascript' }); } catch (e2) { file = null; }
+      }
+      if (!file) { msg('无法构造文件，请用复制方式'); return; }
+
+      var payload = { files: [file], title: installName, text: installName };
+      if (!nav.canShare(payload)) {
+        payload = { files: [file] };
+        if (!nav.canShare(payload)) {
+          msg('系统不允许分享此文件类型，请用复制方式');
+          return;
+        }
+      }
+      msg('正在唤起分享面板，请选择 ChromeXt');
+      nav.share(payload).then(function () {
+        msg('已分享，若 ChromeXt 打开则按其提示安装');
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') msg('已取消分享');
+        else msg('分享失败：' + (err && err.message || err) + '，请用复制方式');
+      });
     }
 
     /* ★ 直接安装：ChromeXt 的 Listener.kt 实现了 "installScript" action，
@@ -616,6 +657,7 @@
       var items = [
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '🖥️ 全屏打开', f: fullOpen },
+        { t: '📤 分享给 ChromeXt 安装（推荐）', f: shareInstall },
         { t: '📥 Install UserScript（直接安装）', f: installViaChromeXt },
         { t: '🚀 跳转 Install UserScript（改地址）', f: pushStateInstall },
         { t: '📦 安装为 ChromeXt 脚本', f: openInstall },
@@ -675,6 +717,7 @@
     $('fv-srcpage').onclick = renderInstallSourcePage;
     $('fv-path').onclick = copyFilePath;
     $('fv-quick').onclick = installViaChromeXt;
+    $('fv-share').onclick = shareInstall;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
@@ -785,6 +828,7 @@
       '<div class="ih">' +
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
         '<button class="btn" id="fv-srcpage">📄 打开脚本源码页（长按安装）</button>' +
+        '<button class="btn" id="fv-share">📤 分享给 ChromeXt 安装（推荐）</button>' +
         '<button class="btn" id="fv-quick">📥 Install UserScript（直接安装）</button>' +
 
         '<button class="btn" id="fv-jump">🚀 跳转 Install UserScript</button>' +
