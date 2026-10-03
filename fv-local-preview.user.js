@@ -25,7 +25,74 @@
      这是本脚本自带的托管能力，不依赖 ChromeXt 的安装通道。
   ============================================================ */
   var LIB_KEY = 'fv_script_lib_v1';
-  var isPreview = (location.hostname === 'fv-local-preview.invalid');
+  var ENTRY_HOST = 'fv-local-preview.invalid';
+  var TS_KEY = 'fv_entry_ts';
+
+  /* ---------- 入口域名访问时间戳（首次 document-start 时记录） ---------- */
+  function markEntry() {
+    try { localStorage.setItem(TS_KEY, String(Date.now())); } catch (e) {}
+  }
+  function recentEntry(ms) {
+    try {
+      var t = parseInt(localStorage.getItem(TS_KEY) || '0', 10);
+      return t > 0 && (Date.now() - t) < (ms || 30000);
+    } catch (e) { return false; }
+  }
+
+  /* ---------- 错误页识别 ----------
+     .invalid 解析失败后，Chrome 会把 document 换成 chrome-error://chromewebdata/，
+     原 hostname 丢失，所以不能用 hostname 判断。改用：
+       1) location.protocol 为 chrome-error:（最可靠，不依赖文本是否渲染完成）
+       2) 页面文本含 ERR_XXX 错误码（兜底）
+  */
+  /* 页面可见文本：innerText 在部分 WebView 未实现，故三级兜底 */
+  function pageText() {
+    try {
+      var el = document.documentElement || document.body;
+      if (!el) return '';
+      var t = el.innerText;
+      if (!t) t = el.textContent;
+      if (!t && document.body) {
+        t = document.body.innerText || document.body.textContent || document.body.innerHTML || '';
+      }
+      return String(t || '');
+    } catch (e) { return ''; }
+  }
+
+  function isErrorPage() {
+    try {
+      var p = String(location.protocol || '').toLowerCase();
+      if (p === 'chrome-error:' || p === 'chrome:') return true;
+      if (/chromewebdata|neterror/i.test(location.href)) return true;
+    } catch (e) {}
+    if (/ERR_[A-Z_]+/.test(pageText())) return true;
+    return false;
+  }
+
+  /* ---------- 错误页是否显示的是我们的入口地址 ----------
+     Chrome 错误页会原样显示失败的 URL，所以直接找文本里的入口域名，
+     不需要跨 document 传递数据（错误页的 localStorage 可能被隔离）。
+  */
+  function errorPageIsOurs() {
+    try { return pageText().indexOf(ENTRY_HOST) >= 0; } catch (e) { return false; }
+  }
+
+  /* ---------- 是否应构建预览器 ----------
+     返回 'yes'（构建）/ 'no'（不构建，当普通网页）/ 'maybe'（信息不足，稍后重试）
+  */
+  function shouldBuildPreview() {
+    // 情况1：正常加载成功，hostname 就是入口
+    try { if (location.hostname === ENTRY_HOST) { markEntry(); return 'yes'; } } catch (e) {}
+
+    // 情况2：错误页精准识别
+    if (isErrorPage()) {
+      if (errorPageIsOurs()) return 'yes';    // 错误页文本里有入口域名（主信号）
+      if (recentEntry(30000)) return 'yes';   // 兜底：30 秒内刚访问过入口
+      // 文本可能还没渲染、且错误页 localStorage 可能被隔离 → 信息不足，待定
+      return 'maybe';
+    }
+    return 'no';
+  }
 
   function parseMatches(code) {
     var out = [], re = /^\s*\/\/\s*@match\s+(\S+)\s*$/gm, m;
@@ -57,15 +124,35 @@
     } catch (e) {}
   }
 
-  if (!isPreview) {
-    // 普通网页：只做脚本库分发，不碰页面结构
+  function runLibrarySoon() {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () { setTimeout(runLibrary, 10); });
     } else {
       setTimeout(runLibrary, 10);
     }
-    return; // 不进入预览器构建流程
   }
+
+  var decision = shouldBuildPreview();
+
+  if (decision === 'no') {
+    // 普通网页：只做脚本库分发，不碰页面结构
+    runLibrarySoon();
+    return;
+  }
+
+  if (decision === 'maybe') {
+    // 错误页刚注入、文本还没渲染：轮询等待确认归属，最多约 3 秒
+    var probe = [50, 100, 200, 400, 800, 1500, 3000], pi = 0;
+    (function nextProbe() {
+      var d2 = shouldBuildPreview();
+      if (d2 === 'yes') { startPreview(); return; }
+      if (d2 === 'no') { runLibrarySoon(); return; }
+      if (pi < probe.length) { setTimeout(nextProbe, probe[pi++]); }
+      else { runLibrarySoon(); }   // 超时仍未确认，当普通网页处理
+    })();
+    return;
+  }
+  // decision === 'yes' → 继续往下构建预览器
 
   /* ============================================================
      工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
@@ -1155,12 +1242,17 @@
     }, delay);
   }
 
-  build();
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { build(); });
+  /* 统一入口：构建预览器（错误页会被 WebView 二次提交，故多重重试） */
+  function startPreview() {
+    build();
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { build(); });
+    }
+    window.addEventListener('load', function () { build(); });
+    schedule([0, 30, 80, 150, 300, 600, 1000, 2000]);
   }
-  window.addEventListener('load', function () { build(); });
-  schedule([0, 30, 80, 150, 300, 600, 1000, 2000]);
+
+  startPreview();
 
   window.__fvFixedLoaded = true;
 })();
