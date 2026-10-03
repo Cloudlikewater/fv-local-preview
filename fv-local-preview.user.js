@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         FV 本地文件预览器（固定入口·全屏修复·多格式版）
+// @name         FV 本地文件预览器（固定入口·Install UserScript 版）
 // @namespace    com.example.fv
-// @version      6.0
-// @description  固定入口 https://fv-local-preview.invalid/ ；全屏改为页内覆盖层（不再用 data: 顶层导航），修复白屏；支持 html/xml/svg/json/md/js/pdf/mhtml/图片/音视频/csv/txt 等
+// @version      7.0
+// @description  固定入口 https://fv-local-preview.invalid/ ；支持 html/xml/svg/json/md/js/pdf/mhtml/图片/音视频/csv；可通过 ChromeXt.dispatch("installScript") 直接安装 UserScript
 // @match        https://fv-local-preview.invalid/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM.ChromeXt
 // ==/UserScript==
 
 (function () {
@@ -13,48 +13,12 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
-  /* ============================================================
-     安装页模式：当 URL 路径以 .user.js 结尾时，把整个页面变成纯脚本源码。
-     这样 ChromeXt 会像打开 GitHub raw .user.js 一样识别，并从页面文本读取安装。
-     源码通过 hash 里的 base64 传递（跨页面导航不丢数据）。
-  ============================================================ */
-  if (/\.user\.js$/i.test(location.pathname || '')) {
-    (function buildSourcePage() {
-      function go() {
-        try {
-          var doc = document;
-          if (!doc.documentElement) return false;
-          if (doc.getElementById('fv-src-ready')) return true;
-          if (!doc.body) doc.documentElement.appendChild(doc.createElement('body'));
-          var h = decodeURIComponent((location.hash || '').replace(/^#/, ''));
-          var code = '';
-          try { code = decodeURIComponent(escape(atob(h))); } catch (e) { code = ''; }
-          if (!code) code = '// 未能还原脚本源码，请返回预览器用「复制代码」或「下载 .user.js」方式安装';
-          try { if (doc.head) doc.head.innerHTML = ''; } catch (e) {}
-          try { doc.title = 'Install UserScript'; } catch (e) {}
-          doc.body.innerHTML = '';
-          doc.body.style.cssText = 'margin:0;background:#fff;color:#333;font:13px/1.6 system-ui';
-          var tip = document.createElement('div');
-          tip.id = 'fv-src-ready';
-          tip.style.cssText = 'padding:10px 12px;background:#eef7f2;color:#2f7d63;font:13px/1.6 system-ui;' +
-            'border-bottom:1px solid #d6ebe0;line-height:1.7';
-          tip.textContent = '脚本源码已就绪。若没有自动弹出安装提示，请长按本页空白处 → ChromeXt 菜单 → Install UserScript。';
-          var pre = document.createElement('pre');
-          pre.style.cssText = 'margin:0;padding:12px;white-space:pre-wrap;word-break:break-all;' +
-            'color:#333;font:12px/1.6 Consolas,monospace;-webkit-user-select:text;user-select:text';
-          pre.textContent = code;
-          doc.body.appendChild(tip);
-          doc.body.appendChild(pre);
-          return true;
-        } catch (e) { return false; }
-      }
-      go();
-      [0, 30, 80, 150, 300, 600, 1000].forEach(function (d) { setTimeout(go, d); });
-      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go);
-      window.addEventListener('load', go);
-    })();
-    return;
-  }
+  /* 捕获 ChromeXt.dispatch 引用：GM.ChromeXt 解锁后，ChromeXt 对象只在用户脚本作用域可见，
+     这里提前挂到 window，供后续注入的页面脚本调用（installScript 会直接写入脚本库）。 */
+  try {
+    window.__fvCX = (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function')
+      ? ChromeXt : null;
+  } catch (e) { window.__fvCX = null; }
 
   /* ============================================================
      工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
@@ -498,10 +462,34 @@
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
       instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
-        ' 推荐：① 点「打开 .user.js 安装页」→ 跳转后长按页面 → ChromeXt 菜单选 Install UserScript；' +
-        '② 下载 .user.js → 文件管理器长按它 → 打开方式选 ChromeXt；③ 复制粘贴到 ChromeXt 新建脚本。';
+        ' 推荐：① 点「Install UserScript（直接安装）」一键装；' +
+        '② 点「打开脚本源码页」→ 长按页面 → ChromeXt 菜单选 Install UserScript；' +
+        '③ 下载 .user.js → 文件管理器长按它 → 打开方式选 ChromeXt；④ 复制粘贴。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
+    }
+
+    /* ★ 直接安装：ChromeXt 的 Listener.kt 实现了 "installScript" action，
+       会 parseScript(payload) 后 ScriptDbManager.insert(script)，即真正写入脚本库。
+       需脚本头声明 @grant GM.ChromeXt 才解锁；未解锁自动回退到源码页方式。 */
+    function installViaChromeXt() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      var code = buildUserScript(lastText, lastName);
+      installCode = code;
+      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
+      var CX = window.__fvCX;
+      if (!CX) {
+        msg('未解锁 GM.ChromeXt（需 @grant GM.ChromeXt），已改用源码页方式');
+        setTimeout(renderInstallSourcePage, 400);
+        return;
+      }
+      try {
+        CX.dispatch('installScript', code);
+        msg('已发送 installScript 请求，留意是否出现提示');
+      } catch (e) {
+        msg('安装失败：' + e.message + '，已改用源码页方式');
+        setTimeout(renderInstallSourcePage, 400);
+      }
     }
 
     /* 主方案：把当前页变成「脚本源码页」，再用 ChromeXt 的 Install UserScript 菜单安装。
@@ -517,22 +505,6 @@
       showOvSrc(true);
       getOvSrc().textContent = installCode;
       msg('已生成源码页，请长按页面使用 ChromeXt 菜单安装');
-    }
-
-    /* 主推方案：直接跳到「路径以 .user.js 结尾」的 URL（和 GitHub raw 链接同形态），
-       源码放 hash 里，新页面由本脚本还原成纯源码页，交给 ChromeXt 识别安装。 */
-    function tryUrlInstall() {
-      if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
-      var b64;
-      try { b64 = btoa(unescape(encodeURIComponent(installCode))); }
-      catch (e) { msg('编码失败，请用复制或下载方式'); return; }
-      var url = 'https://fv-local-preview.invalid/' +
-        encodeURIComponent(installName || 'script.user.js') + '#' + b64;
-      msg('正在跳转到 .user.js 安装页…');
-      setTimeout(function () {
-        try { location.href = url; }
-        catch (e) { msg('跳转失败，请用复制或下载方式'); }
-      }, 300);
     }
 
     /* 实验方案：ChromeXt 按 URL 结尾 .user.js 识别，但 blob 的路径是随机 UUID，
@@ -610,6 +582,7 @@
       var items = [
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '🖥️ 全屏打开', f: fullOpen },
+        { t: '📥 Install UserScript（直接安装）', f: installViaChromeXt },
         { t: '📦 安装为 ChromeXt 脚本', f: openInstall },
         { t: '🧪 临时试运行（不安装）', f: runJs },
         { t: '🌐 网页模式渲染', f: function () { if (lastText) renderHtml(lastText); else msg('请先选择文件'); } },
@@ -663,9 +636,9 @@
     };
     $('fv-dl').onclick = downloadUserScript;
     $('fv-direct').onclick = tryDirectInstall;
-    $('fv-url').onclick = tryUrlInstall;
     $('fv-srcpage').onclick = renderInstallSourcePage;
     $('fv-path').onclick = copyFilePath;
+    $('fv-quick').onclick = installViaChromeXt;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
@@ -775,8 +748,9 @@
     '<div id="fv-inst">' +
       '<div class="ih">' +
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
-        '<button class="btn" id="fv-url">🔗 打开 .user.js 安装页（推荐）</button>' +
-        '<button class="btn sec" id="fv-srcpage">📄 页内源码（长按安装）</button>' +
+        '<button class="btn" id="fv-srcpage">📄 打开脚本源码页（长按安装）</button>' +
+        '<button class="btn" id="fv-quick">📥 Install UserScript（直接安装）</button>' +
+
         '<button class="btn sec" id="fv-direct">⚡ 尝试跳转安装</button>' +
         '<button class="btn sec" id="fv-path">📋 复制 file:// 路径</button>' +
         '<button class="btn" id="fv-copy">📋 复制代码</button>' +
