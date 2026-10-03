@@ -1,9 +1,10 @@
 // ==UserScript==
-// @name         FV 本地文件预览器（固定入口·Install UserScript 版）
+// @name         FV 本地文件预览器（自带脚本库版）
 // @namespace    com.example.fv
-// @version      7.0
-// @description  固定入口 https://fv-local-preview.invalid/ ；支持 html/xml/svg/json/md/js/pdf/mhtml/图片/音视频/csv；可通过 ChromeXt.dispatch("installScript") 直接安装 UserScript
-// @match        https://fv-local-preview.invalid/*
+// @version      8.0
+// @description  固定入口 https://fv-local-preview.invalid/ 预览本地文件；自带脚本库：可把本地 js 存入库并按 @match 在网页自动运行，等效于安装脚本
+// @match        *://*/*
+// @match        file:///*
 // @run-at       document-start
 // @grant        GM.ChromeXt
 // ==/UserScript==
@@ -13,12 +14,58 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
-  /* 捕获 ChromeXt.dispatch 引用：GM.ChromeXt 解锁后，ChromeXt 对象只在用户脚本作用域可见，
-     这里提前挂到 window，供后续注入的页面脚本调用（installScript 会直接写入脚本库）。 */
+  /* 捕获 ChromeXt.dispatch 引用 */
   try {
     window.__fvCX = (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function')
       ? ChromeXt : null;
   } catch (e) { window.__fvCX = null; }
+
+  /* ============================================================
+     非预览页：作为「脚本库运行器」——读出已存脚本，按 @match 执行。
+     这是本脚本自带的托管能力，不依赖 ChromeXt 的安装通道。
+  ============================================================ */
+  var LIB_KEY = 'fv_script_lib_v1';
+  var isPreview = (location.hostname === 'fv-local-preview.invalid');
+
+  function parseMatches(code) {
+    var out = [], re = /^\s*\/\/\s*@match\s+(\S+)\s*$/gm, m;
+    while ((m = re.exec(code)) !== null) out.push(m[1]);
+    return out.length ? out : ['*://*/*'];
+  }
+  function patternHit(pattern, url) {
+    if (pattern === '*' || pattern === '*://*/*') return true;
+    var p = String(pattern).replace(/[.+^${}()|[\]\\?]/g, function (c) { return '\\' + c; });
+    p = p.replace(/\*/g, '[\\s\\S]*');
+    try { return new RegExp('^' + p + '$', 'i').test(url); } catch (e) { return false; }
+  }
+  function runLibrary() {
+    try {
+      var raw = localStorage.getItem(LIB_KEY);
+      if (!raw) return;
+      var list = JSON.parse(raw);
+      if (!list || !list.length) return;
+      var url = location.href;
+      for (var i = 0; i < list.length; i++) {
+        var it = list[i];
+        if (!it || !it.enabled || !it.code) continue;
+        var ms = it.matches && it.matches.length ? it.matches : ['*://*/*'];
+        var hit = false;
+        for (var j = 0; j < ms.length; j++) { if (patternHit(ms[j], url)) { hit = true; break; } }
+        if (!hit) continue;
+        try { new Function(it.code).call(window); } catch (err) { console.error('[FV库] ' + (it.name || i) + ' 执行出错', err); }
+      }
+    } catch (e) {}
+  }
+
+  if (!isPreview) {
+    // 普通网页：只做脚本库分发，不碰页面结构
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () { setTimeout(runLibrary, 10); });
+    } else {
+      setTimeout(runLibrary, 10);
+    }
+    return; // 不进入预览器构建流程
+  }
 
   /* ============================================================
      工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
@@ -31,7 +78,8 @@
         toast = $('fv-toast'), fab = $('fv-fab'), mask = $('fv-mask'), card = $('fv-card'),
         instPanel = $('fv-inst'), instCode = $('fv-inst-code'), instTip = $('fv-inst-tip'),
         overlay = $('fv-overlay'), ovFrame = $('fv-ov-frame'), ovTip = $('fv-ov-tip'),
-        ovDl = $('fv-ov-dl');
+        ovDl = $('fv-ov-dl'),
+        libPanel = $('fv-lib'), libList = $('fv-lib-list'), libTip = $('fv-lib-tip');
 
     var lastText = '', lastName = '', lastKind = '', lastFile = null, lastBlob = null;
     var S1 = '<' + 'script>', S2 = '<' + '/script>';
@@ -466,11 +514,157 @@
       installCode = buildUserScript(lastText, lastName);
       instCode.textContent = installCode;
       instTip.textContent = (hasHead(lastText) ? '检测到标准 UserScript 头。' : '已自动补 UserScript 头，建议先改 @match。') +
-        ' 说明：ChromeXt 作者已明确「导入 UserScript 未实现」，网页无法直接写入其脚本库。' +
-        ' 可行路径只有：① 分享文件给 ChromeXt（它声明能接收 JS 文件来安装）；' +
-        '② 复制后在 ChromeXt 新建脚本粘贴。其余按钮为实验性，多数版本无效。';
+        ' 实情：ChromeXt 无「新建脚本」入口，管理页只能管理已装脚本；作者原话是' +
+        '「打开 .user.js 结尾的链接才会有安装弹窗」。所以唯一正路是让 fv 打开一个 .user.js 结尾的 URL —— ' +
+        '点「生成 file:// 安装测试」会自动下载并复制路径，你到地址栏粘贴打开即可。';
       mask.classList.remove('on');
       instPanel.style.display = 'flex';
+    }
+
+    /* ============================================================
+       ★ 自带脚本库：把本地 js 存进 localStorage，之后所有网页按 @match 自动执行。
+         效果等同于「安装脚本」，且不需要 ChromeXt 的安装通道。
+    ============================================================ */
+    var LIB_KEY = 'fv_script_lib_v1';
+    function libLoad() {
+      try { return JSON.parse(localStorage.getItem(LIB_KEY) || '[]') || []; }
+      catch (e) { return []; }
+    }
+    function libSave(list) {
+      try { localStorage.setItem(LIB_KEY, JSON.stringify(list)); return true; }
+      catch (e) { msg('保存失败：' + e.message); return false; }
+    }
+    function libParseMatches(code) {
+      var out = [], re = /^\s*\/\/\s*@match\s+(\S+)\s*$/gm, m;
+      while ((m = re.exec(code)) !== null) out.push(m[1]);
+      return out.length ? out : ['*://*/*'];
+    }
+    function libAddCurrent() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      var code = buildUserScript(lastText, lastName);
+      var name = String(lastName).replace(/\.(js|mjs)$/i, '') || 'script';
+      var list = libLoad();
+      list = list.filter(function (x) { return x.name !== name; });
+      list.push({
+        id: String(Date.now()),
+        name: name,
+        code: code,
+        matches: libParseMatches(code),
+        enabled: true,
+        at: Date.now()
+      });
+      if (libSave(list)) {
+        msg('已存入脚本库：' + name + '（将在匹配的网页自动运行）');
+        libRender();
+      }
+    }
+    function libToggle(id) {
+      var list = libLoad();
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === id) { list[i].enabled = !list[i].enabled; break; }
+      }
+      libSave(list); libRender();
+    }
+    function libRemove(id) {
+      var list = libLoad().filter(function (x) { return x.id !== id; });
+      libSave(list); libRender(); msg('已删除');
+    }
+    function libView(id) {
+      var list = libLoad();
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === id) {
+          instCode.textContent = list[i].code;
+          instTip.textContent = '脚本库中的：' + list[i].name + '（可复制）';
+          instPanel.style.display = 'flex';
+          return;
+        }
+      }
+    }
+    function libRender() {
+      var list = libLoad();
+      libList.innerHTML = '';
+      if (!list.length) {
+        libList.innerHTML = '<div style="color:#888;padding:16px;text-align:center;font:14px system-ui">' +
+          '脚本库为空。先选一个 js 文件，再点「➕ 存入脚本库」。</div>';
+        libTip.textContent = '脚本库：选中本地 js 后点「➕ 存入脚本库」，之后访问匹配的网页会自动运行。';
+        return;
+      }
+      libTip.textContent = '共 ' + list.length + ' 个脚本。启用中的会在 @match 匹配的网页自动运行（无需 ChromeXt 安装）。';
+      list.forEach(function (it) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid #f0f0f0;background:#fff';
+        var info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:0';
+        info.innerHTML = '<div style="font:600 14px system-ui;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          esc(it.name) + '</div>' +
+          '<div style="font:12px system-ui;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          esc((it.matches || []).join(' , ')) + '</div>';
+        row.appendChild(info);
+
+        var bt = document.createElement('button');
+        bt.textContent = it.enabled ? '启用' : '停用';
+        bt.style.cssText = 'padding:6px 10px;border:0;border-radius:6px;font:600 12px system-ui;cursor:pointer;background:' +
+          (it.enabled ? '#2f7d63' : '#ccc') + ';color:#fff';
+        bt.onclick = (function (id) { return function () { libToggle(id); }; })(it.id);
+        row.appendChild(bt);
+
+        var bv = document.createElement('button');
+        bv.textContent = '查看';
+        bv.style.cssText = 'padding:6px 10px;border:0;border-radius:6px;font:600 12px system-ui;cursor:pointer;background:#607d8b;color:#fff';
+        bv.onclick = (function (id) { return function () { libView(id); }; })(it.id);
+        row.appendChild(bv);
+
+        var bd = document.createElement('button');
+        bd.textContent = '删除';
+        bd.style.cssText = 'padding:6px 10px;border:0;border-radius:6px;font:600 12px system-ui;cursor:pointer;background:#d32f2f;color:#fff';
+        bd.onclick = (function (id) { return function () { libRemove(id); }; })(it.id);
+        row.appendChild(bd);
+
+        libList.appendChild(row);
+      });
+    }
+    function openLib() {
+      mask.classList.remove('on');
+      instPanel.style.display = 'none';
+      libRender();
+      libPanel.style.display = 'flex';
+    }
+
+    /* 管理前端：只能管理「已安装」的脚本（开关/编辑/删除），没有新建按钮；
+       且作者明确说过：至少要装过一个脚本，管理页才会显示内容。
+       所以这里只负责打开它，不假装能新建。 */
+    var MANAGER_URL = 'https://jingmatrix.github.io/ChromeXt/';
+    function openManager() {
+      msg('正在打开 ChromeXt 管理页（仅能管理已装脚本，无新建功能）');
+      setTimeout(function () {
+        try { location.href = MANAGER_URL; } catch (e) {
+          try { window.open(MANAGER_URL, '_blank'); } catch (e2) { msg('请手动访问 ' + MANAGER_URL); }
+        }
+      }, 300);
+    }
+
+    /* ★★★ 目前唯一有理论依据的安装路径：
+       ChromeXt 作者原话「打开 user.js 结尾的链接便会有弹窗提示安装脚本」，
+       README 也说「下载脚本后在浏览器里打开，安装提示会再次出现」。
+       它的判定只针对 URL 字符串结尾，file:// 同样满足 .user.js 结尾。
+       流程：先下载到 Download → 复制下面的路径 → 到 fv 地址栏粘贴打开 → 看是否弹安装。
+       注意：https 页面无法自动跳转到 file://，只能手动粘贴，这是浏览器安全限制。 */
+    function prepareFileInstall() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      installCode = buildUserScript(lastText, lastName);
+      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
+      instCode.textContent = installCode;
+      downloadUserScript();
+      var p = 'file:///sdcard/Download/' + installName;
+      copyText(p, function (ok) {
+        if (ok) {
+          instTip.textContent = '已复制路径：' + p + '。请在 fv 地址栏长按粘贴并打开，若 ChromeXt 生效会弹安装提示。' +
+            '（若仍进文本编辑器不弹窗，说明 fv 的文件阅读器不是 WebView，此路不通）';
+          msg('已复制 file:// 路径，请到地址栏粘贴打开测试');
+        } else {
+          msg('复制失败，请手动在地址栏输入：' + p);
+        }
+      });
     }
 
     /* ★★ 分享安装（最有希望的一条）：
@@ -656,10 +850,11 @@
       if (mask.classList.contains('on')) { mask.classList.remove('on'); return; }
       var items = [
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
+        { t: '📚 脚本库（存入并自动运行）', f: openLib },
+        { t: '➕ 把当前 js 存入脚本库', f: libAddCurrent },
         { t: '🖥️ 全屏打开', f: fullOpen },
-        { t: '📤 分享给 ChromeXt 安装（推荐）', f: shareInstall },
-        { t: '📥 Install UserScript（直接安装）', f: installViaChromeXt },
-        { t: '🚀 跳转 Install UserScript（改地址）', f: pushStateInstall },
+        { t: '🧪 生成 file:// 安装测试', f: prepareFileInstall },
+        { t: '⚙️ 打开 ChromeXt 管理页', f: openManager },
         { t: '📦 安装为 ChromeXt 脚本', f: openInstall },
         { t: '🧪 临时试运行（不安装）', f: runJs },
         { t: '🌐 网页模式渲染', f: function () { if (lastText) renderHtml(lastText); else msg('请先选择文件'); } },
@@ -712,13 +907,13 @@
       copyText(installCode, function (ok) { msg(ok ? '已复制到剪贴板' : '复制失败，请长按代码手动复制'); });
     };
     $('fv-dl').onclick = downloadUserScript;
-    $('fv-direct').onclick = tryDirectInstall;
-    $('fv-jump').onclick = pushStateInstall;
     $('fv-srcpage').onclick = renderInstallSourcePage;
-    $('fv-path').onclick = copyFilePath;
-    $('fv-quick').onclick = installViaChromeXt;
-    $('fv-share').onclick = shareInstall;
+    $('fv-mgr').onclick = prepareFileInstall;
+    $('fv-mgr2').onclick = openManager;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
+    $('fv-lib-btn').onclick = openLib;
+    $('fv-lib-add').onclick = libAddCurrent;
+    $('fv-lib-close').onclick = function () { libPanel.style.display = 'none'; };
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
       try {
@@ -802,6 +997,10 @@
     '#fv-overlay{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column}' +
     '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
     '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
+    '#fv-lib{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-lib .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
+    '#fv-lib-tip{padding:8px 12px;color:#666;font-size:12px;background:#eaf4ef;border-bottom:1px solid #d5e8de;line-height:1.7}' +
+    '#fv-lib-list{flex:1;overflow:auto;background:#fafafa}' +
     '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
 
   var BODY =
@@ -810,7 +1009,8 @@
       '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
         '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
       '</span>' +
-      '<button class="btn" id="fv-inst-btn">📦 安装脚本</button>' +
+      '<button class="btn" id="fv-lib-btn">📚 脚本库</button>' +
+      '<button class="btn ghost" id="fv-inst-btn">📦 安装脚本</button>' +
       '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
       '<button class="btn sec" id="fv-reload">重载</button>' +
       '<button class="btn ghost" id="fv-home">首页</button>' +
@@ -827,15 +1027,11 @@
     '<div id="fv-inst">' +
       '<div class="ih">' +
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
-        '<button class="btn" id="fv-srcpage">📄 打开脚本源码页（长按安装）</button>' +
-        '<button class="btn" id="fv-share">📤 分享给 ChromeXt 安装（推荐）</button>' +
-        '<button class="btn" id="fv-quick">📥 Install UserScript（直接安装）</button>' +
-
-        '<button class="btn" id="fv-jump">🚀 跳转 Install UserScript</button>' +
-        '<button class="btn sec" id="fv-direct">⚡ 兜底跳转（blob）</button>' +
-        '<button class="btn sec" id="fv-path">📋 复制 file:// 路径</button>' +
-        '<button class="btn" id="fv-copy">📋 复制代码</button>' +
+        '<button class="btn" id="fv-mgr">🧪 生成 file:// 安装测试</button>' +
+        '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
+        '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
         '<button class="btn sec" id="fv-dl">⬇️ 下载 .user.js</button>' +
+        '<button class="btn sec" id="fv-srcpage">📄 源码页查看</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-inst-tip"></div>' +
@@ -849,6 +1045,15 @@
       '</div>' +
       '<div id="fv-ov-tip"></div>' +
       '<iframe id="fv-ov-frame"></iframe>' +
+    '</div>' +
+    '<div id="fv-lib">' +
+      '<div class="ih">' +
+        '<span class="title">📚 脚本库</span>' +
+        '<button class="btn" id="fv-lib-add">➕ 存入脚本库</button>' +
+        '<button class="btn ghost" id="fv-lib-close">✕ 关闭</button>' +
+      '</div>' +
+      '<div class="tip" id="fv-lib-tip"></div>' +
+      '<div id="fv-lib-list" style="flex:1;overflow:auto"></div>' +
     '</div>';
 
   /* ============================================================
