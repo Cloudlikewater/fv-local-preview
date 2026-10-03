@@ -623,6 +623,57 @@
         libList.appendChild(row);
       });
     }
+    /* ☁️ 一键传 GitHub：直接打开 GitHub「新建文件」页并预填文件名与内容。
+       提交后拿到 raw 链接，回 fv 打开即触发 ChromeXt 安装提示 ——
+       这是原生安装的快捷通道，把原本十来步压到「点提交 + 复制链接」。 */
+    function ghUpload() {
+      if (!lastText) { msg('请先选择 js 文件'); return; }
+      var code = buildUserScript(lastText, lastName);
+      var name = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'script') + '.user.js';
+
+      var repo = '';
+      var branch = '';
+      try {
+        repo = localStorage.getItem('fv_gh_repo') || '';
+        branch = localStorage.getItem('fv_gh_branch') || 'main';
+      } catch (e) {}
+
+      if (!repo) {
+        try {
+          repo = prompt('输入 GitHub 仓库（格式：用户名/仓库名）', '') || '';
+        } catch (e) { repo = ''; }
+        repo = String(repo).trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
+        if (!repo) { msg('未填仓库，已取消'); return; }
+        try {
+          localStorage.setItem('fv_gh_repo', repo);
+          localStorage.setItem('fv_gh_branch', branch || 'main');
+        } catch (e) {}
+      }
+      if (!branch) branch = 'main';
+
+      var url = 'https://github.com/' + repo + '/new/' + branch +
+        '?filename=' + encodeURIComponent(name) +
+        '&value=' + encodeURIComponent(code);
+
+      if (url.length > 8000) {
+        msg('脚本较长（' + code.length + ' 字符），URL 可能被截断，建议改用脚本库');
+      } else {
+        msg('正在打开 GitHub 新建文件页（内容已预填）');
+      }
+      setTimeout(function () {
+        try { location.href = url; } catch (e) {
+          try { window.open(url, '_blank'); } catch (e2) { msg('打开失败，请手动访问 github.com'); }
+        }
+      }, 400);
+    }
+    function ghReset() {
+      try {
+        localStorage.removeItem('fv_gh_repo');
+        localStorage.removeItem('fv_gh_branch');
+        msg('已清除仓库配置，下次将重新询问');
+      } catch (e) { msg('清除失败'); }
+    }
+
     function openLib() {
       mask.classList.remove('on');
       instPanel.style.display = 'none';
@@ -852,6 +903,7 @@
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '📚 脚本库（存入并自动运行）', f: openLib },
         { t: '➕ 把当前 js 存入脚本库', f: libAddCurrent },
+        { t: '☁️ 一键传 GitHub（原生安装）', f: ghUpload },
         { t: '🖥️ 全屏打开', f: fullOpen },
         { t: '🧪 生成 file:// 安装测试', f: prepareFileInstall },
         { t: '⚙️ 打开 ChromeXt 管理页', f: openManager },
@@ -914,6 +966,8 @@
     $('fv-lib-btn').onclick = openLib;
     $('fv-lib-add').onclick = libAddCurrent;
     $('fv-lib-close').onclick = function () { libPanel.style.display = 'none'; };
+    $('fv-gh').onclick = ghUpload;
+    $('fv-gh-reset').onclick = ghReset;
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
       try {
@@ -1050,6 +1104,8 @@
       '<div class="ih">' +
         '<span class="title">📚 脚本库</span>' +
         '<button class="btn" id="fv-lib-add">➕ 存入脚本库</button>' +
+        '<button class="btn sec" id="fv-gh">☁️ 一键传 GitHub</button>' +
+        '<button class="btn ghost" id="fv-gh-reset">🔄 换仓库</button>' +
         '<button class="btn ghost" id="fv-lib-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-lib-tip"></div>' +
