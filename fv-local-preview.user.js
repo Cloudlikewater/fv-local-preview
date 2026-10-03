@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         FV 本地文件预览器（自带脚本库版）
 // @namespace    com.example.fv
-// @version      8.0
+// @version      9.0
 // @description  固定入口 https://fv-local-preview.invalid/ 预览本地文件；自带脚本库：可把本地 js 存入库并按 @match 在网页自动运行，等效于安装脚本
 // @match        *://*/*
 // @match        file:///*
 // @run-at       document-start
 // @grant        GM.ChromeXt
+// @grant        GM_setValue
+// @grant        GM_getValue
 // ==/UserScript==
 
 (function () {
@@ -21,6 +23,50 @@
   } catch (e) { window.__fvCX = null; }
 
   /* ============================================================
+     存储层：GM_setValue / GM_getValue 优先
+     ChromeXt 把它们存在浏览器进程里，所有 origin 共享 —— 这是唯一能
+     让「错误页(预览器) 写入、普通网页(脚本库) 读出」的存储方案。
+     localStorage 在错误页是 opaque origin，会直接抛 SecurityError。
+     这里在外层（用户脚本作用域）捕获引用并挂到 window，
+     供后续注入的页面脚本调用。
+  ============================================================ */
+  window.__fvStore = {
+    get: function (k, d) {
+      try {
+        if (typeof GM_getValue === 'function') {
+          var v = GM_getValue(k, null);
+          if (v !== null && v !== undefined) return v;
+        }
+      } catch (e) {}
+      try {
+        var s = localStorage.getItem(k);
+        if (s !== null && s !== undefined) return s;
+      } catch (e) {}
+      try {
+        if (window.__fvMem && window.__fvMem[k] !== undefined) return window.__fvMem[k];
+      } catch (e) {}
+      return d;
+    },
+    set: function (k, v) {
+      var ok = false;
+      try {
+        if (typeof GM_setValue === 'function') { GM_setValue(k, v); ok = true; }
+      } catch (e) { ok = false; }
+      try { localStorage.setItem(k, v); } catch (e) {}
+      try {
+        if (!window.__fvMem) window.__fvMem = {};
+        window.__fvMem[k] = v;
+      } catch (e) {}
+      return ok;
+    },
+    remove: function (k) {
+      try { if (typeof GM_setValue === 'function') GM_setValue(k, null); } catch (e) {}
+      try { localStorage.removeItem(k); } catch (e) {}
+      try { if (window.__fvMem) delete window.__fvMem[k]; } catch (e) {}
+    }
+  };
+
+  /* ============================================================
      非预览页：作为「脚本库运行器」——读出已存脚本，按 @match 执行。
      这是本脚本自带的托管能力，不依赖 ChromeXt 的安装通道。
   ============================================================ */
@@ -30,11 +76,11 @@
 
   /* ---------- 入口域名访问时间戳（首次 document-start 时记录） ---------- */
   function markEntry() {
-    try { localStorage.setItem(TS_KEY, String(Date.now())); } catch (e) {}
+    try { window.__fvStore.set(TS_KEY, String(Date.now())); } catch (e) {}
   }
   function recentEntry(ms) {
     try {
-      var t = parseInt(localStorage.getItem(TS_KEY) || '0', 10);
+      var t = parseInt(window.__fvStore.get(TS_KEY, '0'), 10);
       return t > 0 && (Date.now() - t) < (ms || 30000);
     } catch (e) { return false; }
   }
@@ -107,7 +153,7 @@
   }
   function runLibrary() {
     try {
-      var raw = localStorage.getItem(LIB_KEY);
+      var raw = window.__fvStore.get(LIB_KEY, null);
       if (!raw) return;
       var list = JSON.parse(raw);
       if (!list || !list.length) return;
@@ -609,17 +655,26 @@
     }
 
     /* ============================================================
-       ★ 自带脚本库：把本地 js 存进 localStorage，之后所有网页按 @match 自动执行。
+       ★ 自带脚本库：把本地 js 存进 GM_setValue（浏览器进程，跨 origin 共享），
+         之后所有网页按 @match 自动执行。不可用时才降级到 localStorage/内存。
          效果等同于「安装脚本」，且不需要 ChromeXt 的安装通道。
     ============================================================ */
     var LIB_KEY = 'fv_script_lib_v1';
+    var ST = window.__fvStore;   // 外层挂的存储层（GM 优先，跨 origin 共享）
     function libLoad() {
-      try { return JSON.parse(localStorage.getItem(LIB_KEY) || '[]') || []; }
+      try { return JSON.parse(ST.get(LIB_KEY, '[]') || '[]') || []; }
       catch (e) { return []; }
     }
     function libSave(list) {
-      try { localStorage.setItem(LIB_KEY, JSON.stringify(list)); return true; }
-      catch (e) { msg('保存失败：' + e.message); return false; }
+      try {
+        var s = JSON.stringify(list);
+        var viaGM = ST.set(LIB_KEY, s);
+        // 校验是否真的写进去（错误页 opaque origin 下 localStorage 静默失败）
+        var back = ST.get(LIB_KEY, null);
+        if (back !== s) { msg('已保存但回读不一致，建议检查 GM 权限'); return false; }
+        msg(viaGM ? '已存入脚本库（GM 存储，跨站点共享）' : '已存入（仅本页可用，GM 不可用）');
+        return true;
+      } catch (e) { msg('保存失败：' + e.message); return false; }
     }
     function libParseMatches(code) {
       var out = [], re = /^\s*\/\/\s*@match\s+(\S+)\s*$/gm, m;
@@ -721,8 +776,8 @@
       var repo = '';
       var branch = '';
       try {
-        repo = localStorage.getItem('fv_gh_repo') || '';
-        branch = localStorage.getItem('fv_gh_branch') || 'main';
+        repo = ST.get('fv_gh_repo', '') || '';
+        branch = ST.get('fv_gh_branch', 'main') || 'main';
       } catch (e) {}
 
       if (!repo) {
@@ -732,8 +787,8 @@
         repo = String(repo).trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
         if (!repo) { msg('未填仓库，已取消'); return; }
         try {
-          localStorage.setItem('fv_gh_repo', repo);
-          localStorage.setItem('fv_gh_branch', branch || 'main');
+          ST.set('fv_gh_repo', repo);
+          ST.set('fv_gh_branch', branch || 'main');
         } catch (e) {}
       }
       if (!branch) branch = 'main';
@@ -755,8 +810,8 @@
     }
     function ghReset() {
       try {
-        localStorage.removeItem('fv_gh_repo');
-        localStorage.removeItem('fv_gh_branch');
+        ST.remove('fv_gh_repo');
+        ST.remove('fv_gh_branch');
         msg('已清除仓库配置，下次将重新询问');
       } catch (e) { msg('清除失败'); }
     }
