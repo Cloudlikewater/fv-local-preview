@@ -16,15 +16,30 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
+  /* 取「页面真实 window」：@grant 非 none 时 GM 会建沙箱，
+     本脚本里的 window 是被包装过的影子对象，挂属性页面脚本看不到。
+     unsafeWindow 是标准解法，拿不到就退回 window。 */
+  var REAL_WIN = null;
+  try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow) REAL_WIN = unsafeWindow; } catch (e) {}
+  if (!REAL_WIN) {
+    try { if (window.wrappedJSObject) REAL_WIN = window.wrappedJSObject; } catch (e) {}
+  }
+  if (!REAL_WIN) {
+    try { REAL_WIN = document.defaultView || window; } catch (e) { REAL_WIN = window; }
+  }
+
   /* 捕获 ChromeXt.dispatch 引用
      关键：@grant GM.ChromeXt 解锁后，ChromeXt 只存在于「本用户脚本的作用域」，
-     页面脚本访问不到，所以必须在这里抓到并挂到 window.__fvCX。
-     但 document-start 时 GM.js 可能尚未注入，所以要做延迟重试。 */
+     页面脚本访问不到，所以必须在这里抓到并通过真实 window 传过去。
+     document-start 时 GM.js 可能尚未注入，所以要做延迟重试。 */
   window.__fvCX = null;
   function grabCX() {
     try {
       if (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function') {
         window.__fvCX = ChromeXt;
+        // 通过真实 window 传给页面脚本（能成功就能在页面里直接安装）
+        try { REAL_WIN.__fvCX = ChromeXt; } catch (e) {}
+        try { document.documentElement.setAttribute('data-fv-cx', '1'); } catch (e) {}
         return true;
       }
     } catch (e) {}
@@ -215,6 +230,11 @@
     try { r.typeof_ChromeXt = (typeof ChromeXt); } catch (e) { r.typeof_ChromeXt = 'throw:' + e.message; }
     try { r.window_ChromeXt = typeof window.ChromeXt; } catch (e) { r.window_ChromeXt = 'throw'; }
     try { r.CX_captured = !!window.__fvCX; } catch (e) { r.CX_captured = false; }
+    try { r.unsafeWindow = typeof unsafeWindow; } catch (e) { r.unsafeWindow = 'throw'; }
+    try { r.bridge_isRealWin = (REAL_WIN && REAL_WIN !== window) ? 'yes(沙箱)' : 'no(同对象)'; } catch (e) {}
+    try { r.bridge_REALWIN_hasCX = !!(REAL_WIN && REAL_WIN.__fvCX); } catch (e) {}
+    try { r.pageWin_hasCX = !!(window.__fvCX); } catch (e) {}
+    try { r.docAttr_cx = document.documentElement.getAttribute('data-fv-cx') || '(none)'; } catch (e) {}
     ['GM_setValue', 'GM_getValue', 'GM_info', 'GM_addStyle'].forEach(function (n) {
       var v;
       try { v = eval('typeof ' + n); } catch (e) { v = 'eval-error'; }
@@ -345,9 +365,11 @@
     return true;
   }
 
-  /* 暴露给页面脚本（页面脚本访问不到本作用域的 saveTask / diag） */
-  window.__fvSaveTask = function (code) { try { return saveTask(code); } catch (e) { return { ok: false, via: 'err' }; } };
-  window.__fvDiagText = function () {
+  /* 暴露给页面脚本
+     注意：GM 沙箱下 window 是包装对象，window.xxx 页面脚本看不到。
+     所以改用「DOM 属性」当桥：documentElement 是页面共享的真实节点，
+     跨沙箱一定可见。同时仍写一份到 REAL_WIN / window 作为补充。 */
+  function diagText() {
     try {
       var r = window.__fvDiag();
       var L = [];
@@ -357,11 +379,35 @@
         L.push(k + ': ' + (Array.isArray(v) ? v.join(' | ') : v));
       });
       L.push('');
-      L.push('判读：若 typeof_ChromeXt 是 undefined → @grant GM.ChromeXt 未解锁（需重新导入脚本）；');
-      L.push('若 gm_GM_setValue 也是 undefined → 错误页未建立 GM 作用域，属正常现象，用中转安装。');
+      L.push('判读：');
+      L.push('· typeof_ChromeXt = function/object → 已解锁，可直连安装；undefined 则未解锁');
+      L.push('· bridge_isRealWin = yes(沙箱) → 已用 unsafeWindow 桥，看 bridge_REALWIN_hasCX');
+      L.push('· 两项都是 false 时，用「中转安装」：跳普通网页完成安装');
       return L.join('\n');
     } catch (e) { return '诊断失败：' + e.message; }
-  };
+  }
+
+  window.__fvSaveTask = function (code) { try { return saveTask(code); } catch (e) { return { ok: false, via: 'err' }; } };
+  window.__fvDiagText = diagText;
+
+  /* 把诊断结果写进 DOM 属性（最可靠的桥） */
+  function pushDiagToDom() {
+    try {
+      var t = diagText();
+      document.documentElement.setAttribute('data-fv-diag', t);
+      try { REAL_WIN.__fvDiagText = diagText; } catch (e) {}
+      try { REAL_WIN.__fvDiag = window.__fvDiag; } catch (e) {}
+      try { REAL_WIN.__fvSaveTask = window.__fvSaveTask; } catch (e) {}
+    } catch (e) {}
+  }
+  pushDiagToDom();
+  setTimeout(pushDiagToDom, 300);
+  setTimeout(pushDiagToDom, 1000);
+  setTimeout(pushDiagToDom, 3000);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { grabCX(); pushDiagToDom(); });
+  }
+  window.addEventListener('load', function () { grabCX(); pushDiagToDom(); });
 
   var decision = shouldBuildPreview();
 
@@ -973,8 +1019,15 @@
     /* ---------- 真正安装 ---------- */
     /* ---------- 诊断：显示为什么拿不到 ChromeXt.dispatch ---------- */
     function showDiag() {
-      var txt = '(诊断不可用)';
-      try { txt = window.__fvDiagText ? window.__fvDiagText() : '(未挂 __fvDiagText)'; } catch (e) { txt = '诊断出错：' + e.message; }
+      var txt = '';
+      // ① DOM 属性桥（跨沙箱最可靠）
+      try {
+        var el = document.documentElement;
+        if (el) txt = el.getAttribute('data-fv-diag') || '';
+      } catch (e) {}
+      // ② window 上的函数
+      if (!txt) { try { txt = window.__fvDiagText ? window.__fvDiagText() : ''; } catch (e) {} }
+      if (!txt) txt = '(诊断未生成：外层脚本未执行到挂载点，或 DOM 桥不可用)';
       instCode.textContent = txt;
       instTip.textContent = '把以上内容复制发给我即可定位。关键看 typeof_ChromeXt 与 gm_GM_setValue 两行。';
       mask.classList.remove('on');
@@ -993,20 +1046,19 @@
       if (!CX || typeof CX.dispatch !== 'function') {
         /* 错误页上拿不到 dispatch（GM 作用域未建立）→ 走中转：
            把脚本存起来，跳到一个普通网页，在那里装完再跳回来。 */
-        var r = null;
-        try { r = window.__fvSaveTask ? window.__fvSaveTask(code) : null; } catch (e) { r = null; }
-        if (r && r.ok) {
-          msg('本页无法直连 ChromeXt，改用中转：正在跳转…（' + (r.via === 'gm' ? 'GM存储' : 'URL携带') + '）');
+        /* 中转完全不依赖桥：直接把代码编码进 URL hash 跳转，
+           目标网页上的外层脚本读到 hash 后执行安装。 */
+        var b = null;
+        try { b = btoa(unescape(encodeURIComponent(code))); } catch (e) { b = null; }
+        if (b && b.length < 60000) {
+          msg('本页无法直连 ChromeXt，改用中转：正在跳转…');
           setTimeout(function () {
-            try {
-              location.href = (r.via === 'url')
-                ? ('https://example.com/' + '#fvinstall=' + r.b64)
-                : 'https://example.com/';
-            } catch (e) { msg('跳转失败，请手动打开任意网页完成安装'); }
+            try { location.href = 'https://example.com/#fvinstall=' + b; }
+            catch (e) { msg('跳转失败，请手动打开任意网页完成安装'); }
           }, 900);
           return;
         }
-        msg('未拿到 dispatch 且中转失败，请用菜单「🔍 诊断」查看原因');
+        msg('未拿到 dispatch 且中转失败（脚本过长），请用菜单「🔍 诊断」');
         return;
       }
       try {
