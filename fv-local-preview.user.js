@@ -16,11 +16,56 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
-  /* 捕获 ChromeXt.dispatch 引用 */
-  try {
-    window.__fvCX = (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function')
-      ? ChromeXt : null;
-  } catch (e) { window.__fvCX = null; }
+  /* 捕获 ChromeXt.dispatch 引用
+     关键：@grant GM.ChromeXt 解锁后，ChromeXt 只存在于「本用户脚本的作用域」，
+     页面脚本访问不到，所以必须在这里抓到并挂到 window.__fvCX。
+     但 document-start 时 GM.js 可能尚未注入，所以要做延迟重试。 */
+  window.__fvCX = null;
+  function grabCX() {
+    try {
+      if (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function') {
+        window.__fvCX = ChromeXt;
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  grabCX();
+  (function retryGrab(times) {
+    if (!times || !times.length || window.__fvCX) return;
+    var delay = times.shift();
+    setTimeout(function () {
+      grabCX();
+      retryGrab(times);
+    }, delay);
+  })([0, 30, 80, 150, 300, 600, 1000, 2000]);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', grabCX);
+  }
+  window.addEventListener('load', grabCX);
+
+  /* 兜底：若脚本作用域拿不到，尝试 window 上的 ChromeXt 或 Symbol 属性 */
+  window.__fvFindCX = function () {
+    if (window.__fvCX) return window.__fvCX;
+    try {
+      if (window.ChromeXt && typeof window.ChromeXt.dispatch === 'function') {
+        window.__fvCX = window.ChromeXt;
+        return window.__fvCX;
+      }
+    } catch (e) {}
+    try {
+      var syms = Object.getOwnPropertySymbols(window);
+      for (var i = 0; i < syms.length; i++) {
+        if (/webidl2js|constructor registry/i.test(String(syms[i]))) continue;
+        var v; try { v = window[syms[i]]; } catch (e2) { continue; }
+        if (v && typeof v.dispatch === 'function') {
+          window.__fvCX = v;
+          return v;
+        }
+      }
+    } catch (e) {}
+    return null;
+  };
 
   /* ============================================================
      存储层：GM_setValue / GM_getValue 优先
@@ -300,14 +345,21 @@
       try {
         if (location.href.indexOf('.user.js') >= 0) history.replaceState(null, '', '/');
       } catch (e) {}
+      // 恢复下方正常预览视图（全屏前 hideAll 把它隐藏了）
+      try {
+        if (lastText) route(lastFile || { name: lastName }, lastText);
+        else if (lastBlob && lastFile) route(lastFile, '');
+      } catch (e) {}
     }
     function backBtn() {
-      return '<button onclick="(window.parent&&window.parent.__fvClose)?window.parent.__fvClose():history.back()" style="position:fixed;top:10px;right:10px;z-index:9999999;padding:8px 14px;background:rgba(47,125,99,.92);color:#fff;border:0;border-radius:20px;font:14px system-ui;cursor:pointer">← 返回</button>';
+      /* 内容里不再内嵌返回按钮：srcdoc 内的 onclick 依赖 window.parent，
+         在部分内核/沙箱下会失效或报错。统一用顶部常驻的「✕ 退出全屏」。 */
+      return '';
     }
     function wrapDoc(body, title) {
       return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
         esc(title || 'FV预览') + '</title><style>html,body{margin:0}body{background:#fff;font:14px/1.6 system-ui;padding:12px}</style></head><body>' +
-        backBtn() + body + '</body></html>';
+        body + '</body></html>';
     }
     window.__fvClose = closeFull;
 
@@ -572,10 +624,20 @@
         openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px Consolas,monospace">' + esc(o) + '</pre>', lastName));
         return;
       }
+      /* ★ html/xhtml/htm/svg/xml：原文直接渲染，绝不包裹。
+         之前用 wrapDoc 把自带 <!doctype><html><head> 的文档又套一层
+         <html><body>，造成标签嵌套，解析器把结构搞乱 → 显示异常。
+         顶部已常驻「✕ 退出全屏」，无需在内容里再塞返回按钮。 */
+      if (e === 'html' || e === 'htm' || e === 'xhtml' || e === 'xht' ||
+          e === 'svg' || e === 'xml' || e === 'xsl' || e === 'xslt' ||
+          /^\s*<(!DOCTYPE|html|\?xml)/i.test(String(lastText).trim())) {
+        openFull(lastText);
+        return;
+      }
       if (e === 'js' || e === 'mjs') {
         var safe = String(lastText).replace(/<\/script>/gi, '<\\/script>');
         openFull('<!doctype html><html><head><meta charset="utf-8"><style>body{background:#fff;font:14px system-ui;padding:16px}</style></head><body>' +
-          backBtn() + '<div id="fv-app"></div>' +
+          '<div id="fv-app"></div>' +
           S1 + 'try{' + safe + '}catch(err){document.body.insertAdjacentHTML("beforeend","<pre style=color:red>Error: "+err.message+"</pre>")}' + S2 +
           '</body></html>');
         msg('已全屏运行 JS');
@@ -627,7 +689,7 @@
          即写入 SQLite 数据库 —— 持久化、重启仍在、出现在 ChromeXt 脚本列表。
          已实测成功。payload 必须是含 // ==UserScript== 的完整脚本文本。
     ============================================================ */
-    var ST = window.__fvStore;   // 外层挂的存储层（仅用于 GitHub 配置等小数据）
+    var ST = window.__fvStore;   // 外层挂的存储层（GM 优先，跨 origin 共享）
 
     /* ---------- 元数据解析：把已有 UserScript 头读成字段 ---------- */
     function parseMeta(code) {
@@ -754,7 +816,7 @@
       var code = composeCode(meta);
       installCode = code;
       installName = meta.name + '.user.js';
-      var CX = window.__fvCX;
+      var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
       if (!CX || typeof CX.dispatch !== 'function') {
         msg('未拿到 ChromeXt.dispatch，请确认脚本头含 @grant GM.ChromeXt 且已重新导入');
         return;
@@ -771,56 +833,6 @@
         CX.dispatch('notification', { id: 'fv-install', uuid: 0, title: 'FV 安装', text: '已安装：' + meta.name, timeout: 2500 });
       } catch (e) {}
       setTimeout(function () { closeInstallDialog(); }, 600);
-    }
-    /* ☁️ 一键传 GitHub：直接打开 GitHub「新建文件」页并预填文件名与内容。
-       提交后拿到 raw 链接，回 fv 打开即触发 ChromeXt 安装提示 ——
-       这是原生安装的快捷通道，把原本十来步压到「点提交 + 复制链接」。 */
-    function ghUpload() {
-      if (!lastText) { msg('请先选择 js 文件'); return; }
-      var code = buildUserScript(lastText, lastName);
-      var name = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'script') + '.user.js';
-
-      var repo = '';
-      var branch = '';
-      try {
-        repo = ST.get('fv_gh_repo', '') || '';
-        branch = ST.get('fv_gh_branch', 'main') || 'main';
-      } catch (e) {}
-
-      if (!repo) {
-        try {
-          repo = prompt('输入 GitHub 仓库（格式：用户名/仓库名）', '') || '';
-        } catch (e) { repo = ''; }
-        repo = String(repo).trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/$/, '');
-        if (!repo) { msg('未填仓库，已取消'); return; }
-        try {
-          ST.set('fv_gh_repo', repo);
-          ST.set('fv_gh_branch', branch || 'main');
-        } catch (e) {}
-      }
-      if (!branch) branch = 'main';
-
-      var url = 'https://github.com/' + repo + '/new/' + branch +
-        '?filename=' + encodeURIComponent(name) +
-        '&value=' + encodeURIComponent(code);
-
-      if (url.length > 8000) {
-        msg('脚本较长（' + code.length + ' 字符），URL 可能被截断，建议改用脚本库');
-      } else {
-        msg('正在打开 GitHub 新建文件页（内容已预填）');
-      }
-      setTimeout(function () {
-        try { location.href = url; } catch (e) {
-          try { window.open(url, '_blank'); } catch (e2) { msg('打开失败，请手动访问 github.com'); }
-        }
-      }, 400);
-    }
-    function ghReset() {
-      try {
-        ST.remove('fv_gh_repo');
-        ST.remove('fv_gh_branch');
-        msg('已清除仓库配置，下次将重新询问');
-      } catch (e) { msg('清除失败'); }
     }
 
     /* 管理前端：只能管理「已安装」的脚本（开关/编辑/删除），没有新建按钮；
@@ -884,7 +896,7 @@
       var code = composeCode(meta);
       installCode = code;
       installName = meta.name + '.user.js';
-      var CX = window.__fvCX;
+      var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
       if (!CX || typeof CX.dispatch !== 'function') {
         msg('未拿到 ChromeXt.dispatch，请确认脚本头含 @grant GM.ChromeXt 且已重新导入');
         return;
@@ -993,7 +1005,6 @@
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '⚡ 安装脚本（可改 @match）', f: openInstallDialog },
         { t: '🖥️ 全屏打开', f: fullOpen },
-        { t: '☁️ 一键传 GitHub（备用）', f: ghUpload },
         { t: '⚙️ 打开 ChromeXt 管理页', f: openManager },
         { t: '🧪 临时试运行（不安装）', f: runJs },
         { t: '🌐 网页模式渲染', f: function () { if (lastText) renderHtml(lastText); else msg('请先选择文件'); } },
@@ -1051,8 +1062,6 @@
     $('fv-dlg-install').onclick = installNow;
     $('fv-dlg-refresh').onclick = refreshDlgCode;
     $('fv-dlg-close').onclick = closeInstallDialog;
-    $('fv-gh').onclick = ghUpload;
-    $('fv-gh-reset').onclick = ghReset;
     $('fv-ov-close').onclick = closeFull;
     ovDl.onclick = function () {
       try {
@@ -1167,8 +1176,6 @@
         '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
         '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
         '<button class="btn sec" id="fv-srcpage">📄 源码页查看</button>' +
-        '<button class="btn sec" id="fv-gh">☁️ 一键传 GitHub</button>' +
-        '<button class="btn ghost" id="fv-gh-reset">🔄 换仓库</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-inst-tip"></div>' +
