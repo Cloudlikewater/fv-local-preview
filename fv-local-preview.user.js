@@ -16,52 +16,6 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
-  /* ============================================================
-     抢占隐藏，缩短错误页闪烁
-     .invalid 必然解析失败，浏览器会先显示一个错误页 document，
-     我们再把它替换成工具页。这里在 document-start 就抢先把可见性关掉，
-     等构建完成再恢复，让用户几乎看不到那一下错误页。
-  ============================================================ */
-  var __fvFlashGuard = false;
-  function hideNow() {
-    if (__fvFlashGuard) return;
-    __fvFlashGuard = true;
-    try {
-      if (document.documentElement) document.documentElement.style.visibility = 'hidden';
-      if (document.body) document.body.style.visibility = 'hidden';
-      var hs = document.createElement('style');
-      hs.setAttribute('data-fv-flash', '1');
-      hs.textContent = 'html,body{visibility:hidden!important;background:#f5f6fa!important}';
-      (document.head || document.documentElement).appendChild(hs);
-    } catch (e) {}
-  }
-  function showNow() {
-    try {
-      if (document.documentElement) document.documentElement.style.visibility = '';
-      if (document.body) document.body.style.visibility = '';
-      var hs = document.querySelector('style[data-fv-flash]');
-      if (hs && hs.parentNode) hs.parentNode.removeChild(hs);
-    } catch (e) {}
-  }
-
-  /* 只在「看起来是入口」时才抢占：
-     hostname 正确，或错误页文本含入口域名，或刚访问过入口 */
-  var looksLikeEntry = false;
-  try { looksLikeEntry = (location.hostname === 'fv-local-preview.invalid'); } catch (e) {}
-  if (!looksLikeEntry) {
-    try { looksLikeEntry = /fv-local-preview\.invalid/.test(String(location.href)); } catch (e) {}
-  }
-  if (!looksLikeEntry) {
-    try {
-      var pt = document.documentElement ? (document.documentElement.innerText || document.documentElement.textContent || '') : '';
-      looksLikeEntry = pt.indexOf('fv-local-preview.invalid') >= 0;
-    } catch (e) {}
-  }
-  if (!looksLikeEntry) {
-    try { looksLikeEntry = String(location.protocol).toLowerCase() === 'chrome-error:'; } catch (e) {}
-  }
-  if (looksLikeEntry) hideNow();
-
   /* 取「页面真实 window」：@grant 非 none 时 GM 会建沙箱，
      本脚本里的 window 是被包装过的影子对象，挂属性页面脚本看不到。
      unsafeWindow 是标准解法，拿不到就退回 window。 */
@@ -179,12 +133,26 @@
     }
   };
 
+  /* 尽早记录「本次访问的是入口」：此刻若 hostname 仍是入口（document-start 阶段），
+     随后错误页就能凭这个时间戳确认归属（错误页 hostname 会变成 chromewebdata）。
+     必须放在 __fvStore 定义之后，否则 set 未定义、记录不到。 */
+  try {
+    if (location.hostname === 'fv-local-preview.invalid') {
+      window.__fvStore.set('fv_entry_ts', String(Date.now()));
+    }
+  } catch (e) {}
+
   /* ============================================================
      入口判定：本脚本只在「预览器入口页」构建工具，
      其它网页一律不改动（脚本本身由 ChromeXt 负责分发）。
   ============================================================ */
   var ENTRY_HOST = 'fv-local-preview.invalid';
+
+
   var TS_KEY = 'fv_entry_ts';
+  /* 入口记忆窗口：首次 document-start 时 hostname 还是入口，会记下时间戳；
+     随后错误页用它确认归属。窗口放大到 5 分钟，避免 DNS 重试耗时导致判否。 */
+  var ENTRY_REMEMBER_MS = 5 * 60 * 1000;
 
   /* ---------- 入口域名访问时间戳（首次 document-start 时记录） ---------- */
   function markEntry() {
@@ -193,7 +161,7 @@
   function recentEntry(ms) {
     try {
       var t = parseInt(window.__fvStore.get(TS_KEY, '0'), 10);
-      return t > 0 && (Date.now() - t) < (ms || 30000);
+      return t > 0 && (Date.now() - t) < (ms || ENTRY_REMEMBER_MS);
     } catch (e) { return false; }
   }
 
@@ -245,7 +213,7 @@
     // 情况2：错误页精准识别
     if (isErrorPage()) {
       if (errorPageIsOurs()) return 'yes';    // 错误页文本里有入口域名（主信号）
-      if (recentEntry(30000)) return 'yes';   // 兜底：30 秒内刚访问过入口
+      if (recentEntry(ENTRY_REMEMBER_MS)) return 'yes';  // 兜底：近期访问过入口
       // 文本可能还没渲染、且错误页 localStorage 可能被隔离 → 信息不足，待定
       return 'maybe';
     }
@@ -306,7 +274,6 @@
      普通网页上 GM 作用域正常，能拿到 dispatch，装完再跳回入口。
      不依赖任何存储或 window 桥，跨沙箱一定可用。
   ============================================================ */
-  var TASK_KEY = 'fv_install_task_v1';
   var HASH_FLAG = '#fvinstall=';
 
   function b64dec(b) {
@@ -331,17 +298,6 @@
       }
     } catch (e) {}
   }
-  function readTask() {
-    try {
-      var h = location.hash || '';
-      if (h.indexOf(HASH_FLAG) === 0) {
-        var c = b64dec(h.slice(HASH_FLAG.length));
-        if (c) return { code: c, via: 'url' };
-      }
-    } catch (e) {}
-    return null;
-  }
-
   function doInstallOnNormalPage(task, done) {
     var CX = null;
     try { if (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function') CX = ChromeXt; } catch (e) {}
@@ -424,42 +380,12 @@
   }
   window.addEventListener('load', function () { grabCX(); pushDiagToDom(); });
 
-  /* ============================================================
-     原生抢占：趁浏览器还没提交错误页，直接写出完整页面
-     早期版本能「像正常网页一样直接显示」就是靠这招：
-     document-start 时 location 仍是入口地址、document 尚未被替换，
-     此刻 document.write 会把内容写进「当前这个 document」，
-     浏览器就不会再提交 ERR_NAME_NOT_RESOLVED 错误页 —— 没有闪烁。
-     若抢占失败（错误页已提交 / write 被拒），自动回退到下面的
-     DOM 替换 + 多重重试逻辑。
-  ============================================================ */
-  function tryNativeWrite() {
-    try {
-      if (location.hostname !== 'fv-local-preview.invalid') return false;
-      if (document.readyState !== 'loading') return false;
-      var page = '<!doctype html><html lang="zh"><head><meta charset="utf-8">' +
-        '<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes">' +
-        '<title>FV 本地文件预览</title><style>' + CSS + '</style></head><body>' +
-        BODY +
-        '<' + 'script>(' + toolScript.toString() + ')();<' + '/script>' +
-        '</body></html>';
-      document.open();
-      document.write(page);
-      document.close();
-      var okp = !!document.getElementById('fv-file');
-      if (okp) { showNow(); }
-      return okp;
-    } catch (e) {
-      return false;
-    }
-  }
 
   var decision = shouldBuildPreview();
 
   if (decision === 'no') {
     // 普通网页：先检查有没有中转安装任务，有就执行；否则直接退出、不改动页面
     tryRelayInstall();
-    showNow();   /* 若之前抢占隐藏过，务必恢复，避免页面永久空白 */
     return;
   }
 
@@ -469,13 +395,136 @@
     (function nextProbe() {
       var d2 = shouldBuildPreview();
       if (d2 === 'yes') { startPreview(); return; }
-      if (d2 === 'no') { showNow(); return; }
+      if (d2 === 'no') return;
       if (pi < probe.length) { setTimeout(nextProbe, probe[pi++]); }
-      else { showNow(); }   /* 超时放弃，必须恢复可见，否则页面一直是空白 */
+      /* 超时：错误页文本始终未渲染。放宽为「近期访问过入口」再确认一次；
+         仍判否则退出，让浏览器原本的错误页正常显示（不隐藏、不空白）。 */
+      else { if (recentEntry(ENTRY_REMEMBER_MS)) { startPreview(); } return; }
     })();
     return;
   }
   // decision === 'yes' → 继续往下构建预览器
+
+  /* ============================================================
+     样式与结构
+  ============================================================ */
+var CSS =
+    '*{box-sizing:border-box}' +
+    'html,body{margin:0;height:100%}' +
+    'body{font:14px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6fa;color:#333}' +
+    '.head{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;box-shadow:0 2px 6px rgba(0,0,0,.04)}' +
+    '.title{font-weight:700;color:#2f7d63;white-space:nowrap}' +
+    '.pick{flex:1;min-width:130px;position:relative;overflow:hidden;background:#fff;border:1px solid #ccd0d6;border-radius:8px;padding:7px 10px;font-size:13px;color:#555;cursor:pointer;white-space:nowrap;text-overflow:ellipsis}' +
+    '.pick input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}' +
+    '.btn{padding:7px 12px;border:0;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;background:#2f7d63;color:#fff;white-space:nowrap}' +
+    '.btn.sec{background:#607d8b}' +
+    '.btn.ghost{background:#eef2f5;color:#333;border:1px solid #ccd0d6}' +
+    '.btn:active{transform:scale(.96)}' +
+    '.stage{height:calc(100% - 54px);background:#fff}' +
+    '#fv-frame{width:100%;height:100%;border:0;background:#fff;display:none}' +
+    '#fv-pre{margin:0;padding:14px;width:100%;height:100%;overflow:auto;white-space:pre-wrap;background:#fafafa;color:#333;font:13px/1.6 "SFMono-Regular",Consolas,monospace;display:none}' +
+    '#fv-md{padding:18px 22px;width:100%;height:100%;overflow:auto;background:#fff;display:none}' +
+    '#fv-media{width:100%;height:100%;display:none;align-items:center;justify-content:center;background:#fff;padding:12px;overflow:auto}' +
+    '#fv-md h1,#fv-md h2,#fv-md h3,#fv-md h4{color:#1f2d3d;margin:16px 0 8px}' +
+    '#fv-md h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
+    '#fv-md p{margin:8px 0}' +
+    '#fv-md a{color:#2f7d63}' +
+    '#fv-md code{background:#f0f2f5;padding:1px 5px;border-radius:4px;color:#c0341d;font-family:Consolas,monospace}' +
+    '#fv-md pre{background:#0f1115;color:#d6deeb;padding:12px;border-radius:8px;overflow:auto}' +
+    '#fv-md pre code{background:transparent;color:inherit}' +
+    '#fv-md blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
+    '#fv-md img{max-width:100%;border-radius:6px}' +
+    '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}' +
+    '.jk{color:#0077aa}.js{color:#d14}.jn{color:#c18401}.jb{color:#8250df}' +
+    '.ck{color:#c792ea}.cs{color:#0a7d34}.cc{color:#7a8290}.cn{color:#c18401}' +
+    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483645;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
+    '#fv-toast.on{opacity:1}' +
+    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483646;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
+    '#fv-fab:active{width:45px;opacity:1}' +
+    '#fv-mask{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
+    '#fv-mask.on{display:flex}' +
+    '#fv-card{width:88%;max-width:420px;max-height:78vh;overflow:auto;background:rgba(255,255,255,.95);border:1px solid rgba(255,255,255,.6);border-radius:24px;padding:16px;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;animation:pop .3s cubic-bezier(.34,1.56,.64,1)}' +
+    '@keyframes pop{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}' +
+    '#fv-card .ct{font-weight:700;color:#2f7d63;text-align:center;font-size:16px;padding:4px 0}' +
+    '.mi{padding:14px;background:rgba(255,255,255,.85);color:#333;border:1px solid rgba(0,0,0,.08);border-radius:14px;font:600 15px system-ui;text-align:center;cursor:pointer;transition:all .2s}' +
+    '.mi:hover{background:#2f7d63;color:#fff}' +
+    '.mi:active{transform:scale(.97)}' +
+    '.mi.close{background:#fdecec;color:#c0392b}' +
+    '#fv-inst{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-inst .ih,#fv-overlay .oh{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
+    '#fv-inst .tip{padding:8px 12px;color:#666;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
+    '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text}' +
+    '#fv-overlay{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column}' +
+    '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
+    '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
+    '#fv-ov-inline{flex:1;width:100%;overflow:auto;background:#fff;display:none}' +
+    '#fv-ov-inline pre{margin:0;padding:14px;white-space:pre-wrap;font:13px/1.6 Consolas,monospace;color:#333}' +
+    '#fv-dlg{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-dlg .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
+    '#fv-dlg-tip{padding:8px 12px;color:#8a6d3b;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
+    '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
+
+var BODY =
+    '<div class="head">' +
+      '<span class="title">📂 FV 本地预览</span>' +
+      '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
+        '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
+      '</span>' +
+      '<button class="btn" id="fv-inst-btn">⚡ 安装脚本</button>' +
+      '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
+      '<button class="btn sec" id="fv-reload">重载</button>' +
+      '<button class="btn ghost" id="fv-home">首页</button>' +
+    '</div>' +
+    '<div class="stage">' +
+      '<iframe id="fv-frame"></iframe>' +
+      '<pre id="fv-pre"></pre>' +
+      '<div id="fv-md"></div>' +
+      '<div id="fv-media"></div>' +
+    '</div>' +
+    '<div id="fv-toast"></div>' +
+    '<div id="fv-fab">FV</div>' +
+    '<div id="fv-mask"><div id="fv-card"></div></div>' +
+    '<div id="fv-inst">' +
+      '<div class="ih">' +
+        '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
+        '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
+        '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
+        '<button class="btn sec" id="fv-srcpage">📄 源码页查看</button>' +
+        '<button class="btn sec" id="fv-gh">☁️ 一键传 GitHub</button>' +
+        '<button class="btn ghost" id="fv-gh-reset">🔄 换仓库</button>' +
+        '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
+      '</div>' +
+      '<div class="tip" id="fv-inst-tip"></div>' +
+      '<div id="fv-inst-code"></div>' +
+    '</div>' +
+    '<div id="fv-overlay">' +
+      '<div class="oh">' +
+        '<span class="title">🖥️ 全屏预览</span>' +
+        '<button class="btn" id="fv-ov-dl" style="display:none">⬇️ 下载</button>' +
+        '<button class="btn ghost" id="fv-ov-close">✕ 退出全屏</button>' +
+      '</div>' +
+      '<div id="fv-ov-tip"></div>' +
+      '<iframe id="fv-ov-frame"></iframe>' +
+      '<div id="fv-ov-inline"></div>' +
+    '</div>' +
+    '<div id="fv-dlg">' +
+      '<div class="ih">' +
+        '<span class="title">⚡ 安装到 ChromeXt</span>' +
+        '<button class="btn" id="fv-dlg-install">✅ 确认安装</button>' +
+        '<button class="btn sec" id="fv-dlg-refresh">🔄 刷新预览</button>' +
+        '<button class="btn ghost" id="fv-dlg-close">✕ 取消</button>' +
+      '</div>' +
+      '<div class="tip" id="fv-dlg-tip"></div>' +
+      '<div style="flex:1;overflow:auto;display:flex;flex-direction:column">' +
+        '<div id="fv-dlg-form" style="padding:12px"></div>' +
+        '<div style="padding:0 12px 12px">' +
+          '<div style="font:600 12px system-ui;color:#555;margin-bottom:4px">最终安装内容（由上方字段生成）</div>' +
+          '<div id="fv-dlg-code" style="max-height:220px;overflow:auto;padding:12px;background:#fff;' +
+            'border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;' +
+            'font:11px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text"></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
 
   /* ============================================================
      工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
@@ -588,30 +637,150 @@
         return '<!doctype html><html><head><meta charset="utf-8">' + vp + '</head><body>' + html + '</body></html>';
       } catch (e) { return html; }
     }
+    /* 渲染模式：null origin（错误页 / chrome-error）下 blob URL 会变成
+       blob:null/xxx，iframe 导航到它被浏览器拒绝 → 白屏。
+       而 srcdoc 不依赖 origin，在此环境反而可靠（预览区已验证可用）。
+       所以策略改为：srcdoc 优先，load 后检测 body 为空再回退 blob。 */
+    /* ============================================================
+       全屏渲染（两级模式）
+       ① inline 模式：内容直接写进覆盖层 div，不用 iframe。
+          用于 md / json / csv / txt / 代码 —— 完全绕开 origin 限制，最可靠。
+       ② doc 模式：需要独立文档环境（html/xml/svg/js）时才用 iframe。
+          错误页是 opaque origin，在此创建的 blob 是 blob:null/... ，
+          Chromium 拒绝 iframe 加载它 → 白屏。所以优先级改为：
+            srcdoc（不依赖 origin，最优先）
+              ↓ 检测失败
+            blob（正常 origin 下可用）
+              ↓ 检测失败
+            inline 兜底（剥离 script 后塞进 div，至少能看到内容）
+    ============================================================ */
+    function ovShowInline(html) {
+      try {
+        ovFrame.style.display = 'none';
+        ovFrame.removeAttribute('srcdoc');
+        try { ovFrame.src = 'about:blank'; } catch (e) {}
+        var box = $('fv-ov-inline');
+        if (!box) return false;
+        box.innerHTML = html || '';
+        box.style.display = 'block';
+        ovLast = ovLast || {};
+        ovLast.way = 'inline(直接注入)';
+        return true;
+      } catch (e) { return false; }
+    }
+
+    function ovLoadedOk(cb) {
+      /* 判断 iframe 是否真的渲染出内容 */
+      var tries = 0, max = 12;
+      (function check() {
+        var of = $('fv-ov-frame');
+        if (!of) { cb(false); return; }
+        var len = -1, hasNode = false;
+        try {
+          var dd = of.contentDocument;
+          if (dd) {
+            if (dd.body) { len = dd.body.innerHTML.length; hasNode = dd.body.childNodes.length > 0; }
+            else if (dd.documentElement) { len = dd.documentElement.innerHTML.length; }
+          }
+        } catch (e) { len = -1; }
+        if (len > 0 || hasNode) { cb(true); return; }
+        if (++tries < max) { setTimeout(check, 120); }
+        else { cb(false); }
+      })();
+    }
+
+    var ovRetryUsed = { srcdoc: false, blob: false };
+
+    function openFullDoc(text, mime, noViewport, tip, dlName) {
+      ovRetryUsed = { srcdoc: false, blob: false };
+      var body = noViewport ? text : withViewport(text);
+
+      function useFrame(way) {
+        var of = $('fv-ov-frame');
+        var box = $('fv-ov-inline');
+        try { if (box) box.style.display = 'none'; } catch (e) {}
+        of.style.display = 'block';
+        if (way === 'srcdoc') {
+          ovRetryUsed.srcdoc = true;
+          try { of.removeAttribute('src'); } catch (e) {}
+          of.srcdoc = body;
+          ovLast = ovLast || {}; ovLast.way = 'iframe srcdoc';
+        } else {
+          ovRetryUsed.blob = true;
+          try { of.removeAttribute('srcdoc'); } catch (e) {}
+          var u = makeBlobUrl(body, mime || 'text/html');
+          if (!u) { next('srcdoc'); return; }
+          of.src = u;
+          ovLast = ovLast || {}; ovLast.way = 'iframe blob'; ovLast.url = u;
+        }
+        ovLoadedOk(function (okk) {
+          if (okk) return;
+          /* 当前方式失败 → 换下一种；都失败则 inline 兜底 */
+          if (way === 'srcdoc' && !ovRetryUsed.blob) { next('blob'); return; }
+          if (way === 'blob' && !ovRetryUsed.srcdoc) { next('srcdoc'); return; }
+          /* 都试过了还不行 → inline（剥离 script/style 避免污染） */
+          var safe = String(body)
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<\/?head[^>]*>/gi, '')
+            .replace(/<\/?html[^>]*>/gi, '')
+            .replace(/<!doctype[^>]*>/gi, '');
+          var bi = safe.indexOf('<body');
+          if (bi >= 0) {
+            var be = safe.indexOf('>', bi);
+            if (be >= 0) safe = safe.slice(be + 1);
+          }
+          safe = safe.replace(/<\/body>/gi, '');
+          ovShowInline('<div style="padding:12px">' + safe + '</div>');
+          ovLast = ovLast || {};
+          ovLast.way = 'inline 兜底(已剥离脚本)';
+          try { if (ovTip) { ovTip.style.display = 'block'; ovTip.textContent = 'iframe 渲染失败（' + way + ' 均无效），已降级为直接注入显示，脚本未执行。'; } } catch (e) {}
+        });
+      }
+      function next(w) { useFrame(w); }
+
+      /* 默认先 srcdoc：错误页 opaque origin 下 blob 会被拒 */
+      useFrame('srcdoc');
+    }
+
     /* mime 必须是合法 MIME；noViewport=true 时跳过 viewport 注入
-       （SVG 是 XML 文档，插入 HTML 的 <meta> 会破坏结构导致白屏） */
-    function openFull(text, blobUrl, tip, dlName, mime, noViewport) {
+       （SVG 是 XML 文档，插入 HTML 的 <meta> 会破坏结构） */
+    function openFull(text, blobUrl, tip, dlName, mime, noViewport, inlineHtml) {
       hideAll();
       overlay.style.display = 'flex';
       ovTip.style.display = tip ? 'block' : 'none';
       ovTip.textContent = tip || '';
-      ovFrame.style.display = 'block';
       ovDl.style.display = dlName ? 'inline-block' : 'none';
       if (dlName) ovDl.setAttribute('data-name', dlName);
-      try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
-      var url = blobUrl;
-      if (!url && text) {
-        var body = noViewport ? text : withViewport(text);
-        url = makeBlobUrl(body, mime || 'text/html');
+      ovLast = {
+        mime: mime || 'text/html',
+        len: (text || '').length,
+        url: blobUrl || '',
+        srcDoc: false,
+        way: '',
+        origin: ''
+      };
+      try { ovLast.origin = String(location.origin || '(opaque)'); } catch (e) {}
+
+      /* 媒体/PDF 直接用 blob（它们是二进制流，srcdoc 不适用） */
+      if (blobUrl) {
+        try { $('fv-ov-inline').style.display = 'none'; } catch (e) {}
+        ovFrame.style.display = 'block';
+        try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
+        ovFrame.src = blobUrl;
+        ovLast.way = 'blob(媒体/PDF)';
+        ovLast.url = blobUrl;
+        return;
       }
-      if (url) { ovFrame.src = url; }
-      else { ovFrame.srcdoc = text || ''; }   // 最终兜底
-      ovLast = { mime: mime || 'text/html', len: (text || '').length, url: url || '', srcDoc: !url };
+      /* 展示类：直接 inline，不用 iframe */
+      if (inlineHtml) { ovShowInline(inlineHtml); return; }
+      openFullDoc(text, mime, noViewport, tip, dlName);
     }
+
     function closeFull() {
       overlay.style.display = 'none';
       try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
       try { ovFrame.src = 'about:blank'; } catch (e) {}
+      try { var bi = $('fv-ov-inline'); if (bi) { bi.innerHTML = ''; bi.style.display = 'none'; } } catch (e) {}
       try { if (lastOvUrl) { URL.revokeObjectURL(lastOvUrl); lastOvUrl = null; } } catch (e) {}
       // 若地址被改成 .user.js 结尾，退出时还原，避免残留
       try {
@@ -636,19 +805,6 @@
       '#fv-md blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
       '#fv-md img{max-width:100%;border-radius:6px}' +
       '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}';
-
-    /* Markdown 完整文档：全屏与普通预览共用，保证两处显示完全一致 */
-    function MD_DOC(inner, title) {
-      return '<!doctype html><html><head><meta charset="utf-8">' +
-        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-        '<title>' + esc(title || 'FV预览') + '</title><style>' + MD_CSS + '</style></head><body>' +
-        '<div id="fv-md">' + inner + '</div></body></html>';
-    }
-    function wrapDoc(body, title) {
-      return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
-        esc(title || 'FV预览') + '</title><style>html,body{margin:0}body{background:#fff;font:14px/1.6 system-ui;padding:12px}</style></head><body>' +
-        body + '</body></html>';
-    }
 
     /* ---------- 各类渲染 ---------- */
     function renderHtml(t) { lastKind = 'html'; showFrameSrc(t); msg('已打开：' + lastName + '（相对路径资源可能加载失败）'); }
@@ -888,29 +1044,35 @@
       if (!lastFile) { msg('请先选择文件'); return; }
       var e = ext();
 
+      /* 媒体 / PDF：null origin 下 blob iframe 会被拒，故不再新建 iframe，
+         直接把预览区已渲染好的内容搬进全屏层。 */
       if (lastKind === 'image' || lastKind === 'audio' || lastKind === 'video') {
-        if (!lastBlob) { msg('当前环境无法全屏预览此媒体'); return; }
-        openFull('', lastBlob, '', lastName);
+        if (!mediaBox.innerHTML) { msg('当前环境无法全屏预览此媒体'); return; }
+        openFullMedia(mediaBox.innerHTML, '', lastName);
         return;
       }
       if (lastKind === 'pdf') {
-        if (!lastBlob) { msg('当前环境无法内嵌 PDF，请用下载按钮保存后打开'); return; }
-        openFull('', lastBlob, '若下方空白，说明内核不支持内嵌 PDF。', lastName);
+        if (!mediaBox.innerHTML) { msg('PDF 无法内嵌预览，请先返回用下载按钮保存'); return; }
+        openFullMedia(mediaBox.innerHTML, '若下方空白，说明内核不支持内嵌 PDF，请用「⬇️ 下载」保存后打开。', lastName);
         return;
       }
-      /* md：全屏与非全屏用同一套渲染结果，避免两处样式不一致 */
+      /* md：全屏与非全屏用同一套渲染结果，避免两处样式不一致。
+         改用 inline 模式（不经过 iframe/blob），彻底绕开 opaque origin 限制。 */
       if (lastKind === 'md') {
-        openFull(MD_DOC(mdToHtml(lastText), lastName));
+        openFull(lastText, null, '', null, null, false,
+          '<style>' + MD_CSS + '</style><div id="fv-md">' + mdToHtml(lastText) + '</div>');
         return;
       }
       if (lastKind === 'csv') {
-        openFull(wrapDoc('<div style="overflow:auto">' + preBox.innerHTML + '</div>', lastName));
+        openFull(lastText, null, '', null, null, false,
+          '<div style="padding:12px;overflow:auto">' + preBox.innerHTML + '</div>');
         return;
       }
       if (lastKind === 'json') {
         var o;
         try { o = JSON.stringify(JSON.parse(lastText), null, 2); } catch (err) { o = lastText; }
-        openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px Consolas,monospace">' + esc(o) + '</pre>', lastName));
+        openFull(lastText, null, '', null, null, false,
+          '<pre style="margin:0;padding:14px;white-space:pre-wrap;font:13px/1.6 Consolas,monospace">' + esc(o) + '</pre>');
         return;
       }
       /* html/htm/xhtml/xml/xsl：原文原样渲染，绝不包裹（嵌套标签会破坏结构）。
@@ -942,12 +1104,14 @@
           '<div id="fvbar"><b>JS 已执行</b> · <span id="fvstate">运行中…</span></div>' +
           '<div id="fv-app" style="margin-top:44px"></div>' +
           S1 +
-          'var __logs=[];' +
-          'var _c={log:function(){__logs.push([].slice.call(arguments).join(" "))},' +
-          'warn:function(){__logs.push("[warn] "+[].slice.call(arguments).join(" "))},' +
-          'error:function(){__logs.push("[error] "+[].slice.call(arguments).join(" "))}};' +
-          'var __out=[];var _d=document;' +
-          'var _w=function(){try{_d.body.insertAdjacentHTML("beforeend","")}catch(e){}};' +
+          'var __logs=[];var _d=document;' +
+          /* 临时接管 console，捕获脚本的 console.log/warn/error 输出。
+             之前只定义了假 console 却没挂上去，等于没捕获（死代码）。 */
+          '(function(){var _c=console;' +
+          '["log","warn","error","info","debug"].forEach(function(k){' +
+          'var o=_c[k]?_c[k].bind(_c):function(){};' +
+          '_c[k]=function(){try{__logs.push("["+k+"] "+[].slice.call(arguments).join(" "))}catch(e){}' +
+          'try{o.apply(null,arguments)}catch(e){}};});})();' +
           'try{' + safe +
           '}catch(err){var p=_d.createElement("pre");p.id="er";' +
           'p.textContent="Error: "+(err&&err.message||err);_d.body.appendChild(p);}' +
@@ -956,7 +1120,7 @@
           '  var n=(_d.getElementById("fv-app")||{}).childNodes?_d.getElementById("fv-app").childNodes.length:0;' +
           '  if(st){st.textContent=(n>0?("已生成 "+n+" 个元素"):"脚本已执行，无可见输出");}' +
           '  if(__logs.length){var o=_d.createElement("div");o.id="fvout";' +
-          '    o.textContent="console 输出：\n"+__logs.join("\n");_d.body.appendChild(o);}' +
+          '    o.textContent="console 输出："+__logs.join(" | ");_d.body.appendChild(o);}' +
           '},120);' +
           S2 +
           '</body></html>');
@@ -965,26 +1129,13 @@
       }
       /* 其余（txt / 未知扩展名）：按代码高亮转义后全屏。
          之前直接塞 lastText 未转义，源码里的 < > 会被当 HTML 解析导致显示错乱。 */
-      openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px/1.6 Consolas,monospace">' +
-        codeHtml(lastText) + '</pre>', lastName));
+      openFull(lastText, null, '', null, null, false,
+        '<pre style="margin:0;padding:14px;white-space:pre-wrap;font:13px/1.6 Consolas,monospace">' +
+        codeHtml(lastText) + '</pre>');
     }
 
     /* ---------- 安装为 ChromeXt 脚本 ---------- */
     var installCode = '', installName = '';
-    function hasHead(src) { return /^\s*\/\/\s*==UserScript==/.test(src); }
-    function buildUserScript(src, name) {
-      if (hasHead(src)) return src;
-      var base = String(name).replace(/\.(js|mjs|user\.js)$/i, '') || 'fv-script';
-      return '// ==UserScript==\n' +
-        '// @name         ' + base + '\n' +
-        '// @namespace    com.example.fv\n' +
-        '// @version      1.0\n' +
-        '// @description  由 FV 本地预览器生成（源文件：' + name + '）\n' +
-        '// @match        *://*/*\n' +
-        '// @run-at       document-idle\n' +
-        '// @grant        none\n' +
-        '// ==/UserScript==\n\n' + src;
-    }
     function copyText(t, cb) {
       function fb() {
         try {
@@ -1148,30 +1299,38 @@
       try {
         L.push('当前文件: ' + (lastName || '(无)') + '  类型: ' + (lastKind || '-'));
         L.push('内容长度: ' + (lastText ? lastText.length : 0) + ' 字符');
+        L.push('页面 origin: ' + (function(){ try { return location.origin || '(opaque/null)'; } catch (e) { return '(读取失败)'; } })());
         if (!ovLast) {
           L.push('尚未打开过全屏');
         } else {
           L.push('上次全屏 MIME: ' + ovLast.mime + (ovLast.mime.indexOf(';') >= 0 ? '' : ' (+charset=utf-8)'));
           L.push('上次全屏 文本长度: ' + ovLast.len);
-          L.push('使用方式: ' + (ovLast.srcDoc ? 'srcdoc（可能被拦截脚本）' : 'blob URL（正常）'));
-          L.push('blob URL: ' + (ovLast.url ? ovLast.url.slice(0, 40) : '(无)'));
+          L.push('★ 渲染方式: ' + (ovLast.way || '-') + '   记录origin: ' + (ovLast.origin || '-'));
+          L.push('地址/来源: ' + String(ovLast.url || '(未用 blob)').slice(0, 46));
+          if (String(ovLast.url || '').indexOf('blob:null/') === 0) {
+            L.push('⚠ 检测到 blob:null/ → 页面处于 opaque(null) origin，');
+            L.push('  Chromium 拒绝 iframe 加载此类 blob，必然白屏。');
+            L.push('  已修复：展示类改 inline 直注，文档类优先 srcdoc，不再依赖 blob。');
+          }
           var of = document.getElementById('fv-ov-frame');
           if (of) {
-            L.push('iframe src: ' + String(of.src || '(空)').slice(0, 40));
-            var bd = null, bl = -1;
-            try { bd = of.contentDocument; if (bd && bd.body) bl = bd.body.innerHTML.length; } catch (e) {}
-            L.push('iframe body 长度: ' + (bl < 0 ? '无法读取(跨域/未加载)' : bl));
-            if (bl === 0) L.push('⚠ body 为空 → 可能是 MIME 错误或文档未渲染');
+            L.push('iframe src: ' + String(of.src || '(空/srcdoc)').slice(0, 40));
+            var bl = -1, cn = -1;
+            try { var dd2 = of.contentDocument; if (dd2 && dd2.body) { bl = dd2.body.innerHTML.length; cn = dd2.body.childNodes.length; } } catch (e) {}
+            L.push('iframe body 长度: ' + (bl < 0 ? '无法读取' : bl) + '  子节点: ' + (cn < 0 ? '-' : cn));
           }
-          L.push('判定：MIME 必须是 text/html 或 image/svg+xml 等合法类型；');
-          L.push('      显示 raw;charset=utf-8 之类即为 BUG，浏览器会拒绝渲染。');
+          var ib2 = document.getElementById('fv-ov-inline');
+          if (ib2) L.push('inline 容器: display=' + (ib2.style.display || '-') + '  内容长度=' + ib2.innerHTML.length);
+          L.push('判读：先看「★ 渲染方式」。inline / srcdoc 为正常；若仍是 iframe blob 且');
+          L.push('      URL 以 blob:null 开头 → 该环境不支持 blob，需确认已走 srcdoc。');
         }
         L.push('');
         L.push('提示：js 全屏后顶部有绿色状态条，显示「脚本已执行，无可见输出」属正常。');
       } catch (e) { L.push('全屏诊断出错: ' + e.message); }
       txt += '\n' + L.join('\n');
       instCode.textContent = txt;
-      instTip.textContent = '把以上内容复制发给我即可定位。上半看 typeof_ChromeXt（安装能力），下半看全屏 MIME 与 iframe body 长度（白屏原因）。';
+      instTip.textContent = '点「📋 复制日志」即可复制以上全部内容。上半看 typeof_ChromeXt（安装能力），下半看「渲染方式」（白屏原因）。';
+      try { var cb = $('fv-copy'); if (cb) cb.textContent = '📋 复制日志'; } catch (e) {}
       mask.classList.remove('on');
       dlgPanel.style.display = 'none';
       instPanel.style.display = 'flex';
@@ -1304,7 +1463,9 @@
     };
     $('fv-home').onclick = function () { location.href = 'https://fv-local-preview.invalid/'; };
     $('fv-copy').onclick = function () {
-      copyText(installCode, function (ok) { msg(ok ? '已复制到剪贴板' : '复制失败，请长按代码手动复制'); });
+      var txt = (instCode && instCode.textContent) ? instCode.textContent : installCode;
+      if (!txt) { msg('没有可复制的内容'); return; }
+      copyText(txt, function (ok) { msg(ok ? '已复制到剪贴板（' + txt.length + ' 字符）' : '复制失败，请长按内容手动复制'); });
     };
     $('fv-mgr2').onclick = openManager;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
@@ -1342,119 +1503,6 @@
     msg('就绪，请选择文件');
   }
 
-  /* ============================================================
-     样式
-  ============================================================ */
-  var CSS =
-    '*{box-sizing:border-box}' +
-    'html,body{margin:0;height:100%}' +
-    'body{font:14px/1.6 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6fa;color:#333}' +
-    '.head{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;box-shadow:0 2px 6px rgba(0,0,0,.04)}' +
-    '.title{font-weight:700;color:#2f7d63;white-space:nowrap}' +
-    '.pick{flex:1;min-width:130px;position:relative;overflow:hidden;background:#fff;border:1px solid #ccd0d6;border-radius:8px;padding:7px 10px;font-size:13px;color:#555;cursor:pointer;white-space:nowrap;text-overflow:ellipsis}' +
-    '.pick input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}' +
-    '.btn{padding:7px 12px;border:0;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;background:#2f7d63;color:#fff;white-space:nowrap}' +
-    '.btn.sec{background:#607d8b}' +
-    '.btn.ghost{background:#eef2f5;color:#333;border:1px solid #ccd0d6}' +
-    '.btn:active{transform:scale(.96)}' +
-    '.stage{height:calc(100% - 54px);background:#fff}' +
-    '#fv-frame{width:100%;height:100%;border:0;background:#fff;display:none}' +
-    '#fv-pre{margin:0;padding:14px;width:100%;height:100%;overflow:auto;white-space:pre-wrap;background:#fafafa;color:#333;font:13px/1.6 "SFMono-Regular",Consolas,monospace;display:none}' +
-    '#fv-md{padding:18px 22px;width:100%;height:100%;overflow:auto;background:#fff;display:none}' +
-    '#fv-media{width:100%;height:100%;display:none;align-items:center;justify-content:center;background:#fff;padding:12px;overflow:auto}' +
-    '#fv-md h1,#fv-md h2,#fv-md h3,#fv-md h4{color:#1f2d3d;margin:16px 0 8px}' +
-    '#fv-md h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
-    '#fv-md p{margin:8px 0}' +
-    '#fv-md a{color:#2f7d63}' +
-    '#fv-md code{background:#f0f2f5;padding:1px 5px;border-radius:4px;color:#c0341d;font-family:Consolas,monospace}' +
-    '#fv-md pre{background:#0f1115;color:#d6deeb;padding:12px;border-radius:8px;overflow:auto}' +
-    '#fv-md pre code{background:transparent;color:inherit}' +
-    '#fv-md blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
-    '#fv-md img{max-width:100%;border-radius:6px}' +
-    '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}' +
-    '.jk{color:#0077aa}.js{color:#d14}.jn{color:#c18401}.jb{color:#8250df}' +
-    '.ck{color:#c792ea}.cs{color:#0a7d34}.cc{color:#7a8290}.cn{color:#c18401}' +
-    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483647;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
-    '#fv-toast.on{opacity:1}' +
-    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483645;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
-    '#fv-fab:active{width:45px;opacity:1}' +
-    '#fv-mask{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
-    '#fv-mask.on{display:flex}' +
-    '#fv-card{width:88%;max-width:420px;max-height:78vh;overflow:auto;background:rgba(255,255,255,.95);border:1px solid rgba(255,255,255,.6);border-radius:24px;padding:16px;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;animation:pop .3s cubic-bezier(.34,1.56,.64,1)}' +
-    '@keyframes pop{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}' +
-    '#fv-card .ct{font-weight:700;color:#2f7d63;text-align:center;font-size:16px;padding:4px 0}' +
-    '.mi{padding:14px;background:rgba(255,255,255,.85);color:#333;border:1px solid rgba(0,0,0,.08);border-radius:14px;font:600 15px system-ui;text-align:center;cursor:pointer;transition:all .2s}' +
-    '.mi:hover{background:#2f7d63;color:#fff}' +
-    '.mi:active{transform:scale(.97)}' +
-    '.mi.close{background:#fdecec;color:#c0392b}' +
-    '#fv-inst{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
-    '#fv-inst .ih,#fv-overlay .oh{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
-    '#fv-inst .tip{padding:8px 12px;color:#666;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
-    '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text}' +
-    '#fv-overlay{position:fixed;inset:0;z-index:2147483644;background:#fff;display:none;flex-direction:column}' +
-    '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
-    '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
-    '#fv-dlg{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
-    '#fv-dlg .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
-    '#fv-dlg-tip{padding:8px 12px;color:#8a6d3b;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
-    '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
-
-  var BODY =
-    '<div class="head">' +
-      '<span class="title">📂 FV 本地预览</span>' +
-      '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
-        '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
-      '</span>' +
-      '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
-      '<button class="btn sec" id="fv-reload">重载</button>' +
-      '<button class="btn ghost" id="fv-home">首页</button>' +
-    '</div>' +
-    '<div class="stage">' +
-      '<iframe id="fv-frame"></iframe>' +
-      '<pre id="fv-pre"></pre>' +
-      '<div id="fv-md"></div>' +
-      '<div id="fv-media"></div>' +
-    '</div>' +
-    '<div id="fv-toast"></div>' +
-    '<div id="fv-fab">FV</div>' +
-    '<div id="fv-mask"><div id="fv-card"></div></div>' +
-    '<div id="fv-inst">' +
-      '<div class="ih">' +
-        '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
-        '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
-        '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
-        '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
-      '</div>' +
-      '<div class="tip" id="fv-inst-tip"></div>' +
-      '<div id="fv-inst-code"></div>' +
-    '</div>' +
-    '<div id="fv-overlay">' +
-      '<div class="oh">' +
-        '<span class="title">🖥️ 全屏预览</span>' +
-        '<button class="btn" id="fv-ov-dl" style="display:none">⬇️ 下载</button>' +
-        '<button class="btn ghost" id="fv-ov-close">✕ 退出全屏</button>' +
-      '</div>' +
-      '<div id="fv-ov-tip"></div>' +
-      '<iframe id="fv-ov-frame"></iframe>' +
-    '</div>' +
-    '<div id="fv-dlg">' +
-      '<div class="ih">' +
-        '<span class="title">⚡ 安装到 ChromeXt</span>' +
-        '<button class="btn" id="fv-dlg-install">✅ 确认安装</button>' +
-        '<button class="btn sec" id="fv-dlg-refresh">🔄 刷新预览</button>' +
-        '<button class="btn ghost" id="fv-dlg-close">✕ 取消</button>' +
-      '</div>' +
-      '<div class="tip" id="fv-dlg-tip"></div>' +
-      '<div style="flex:1;overflow:auto;display:flex;flex-direction:column">' +
-        '<div id="fv-dlg-form" style="padding:12px"></div>' +
-        '<div style="padding:0 12px 12px">' +
-          '<div style="font:600 12px system-ui;color:#555;margin-bottom:4px">最终安装内容（由上方字段生成）</div>' +
-          '<div id="fv-dlg-code" style="max-height:220px;overflow:auto;padding:12px;background:#fff;' +
-            'border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;' +
-            'font:11px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text"></div>' +
-        '</div>' +
-      '</div>' +
-    '</div>';
 
   /* ============================================================
      注入：DOM 替换 + 多重重试
@@ -1490,7 +1538,6 @@
       doc.head.appendChild(st);
 
       doc.body.innerHTML = BODY;
-      showNow();   /* 内容已就位，解除隐藏 */
 
       var sc = doc.createElement('script');
       sc.textContent = '(' + toolScript.toString() + ')();';
@@ -1513,9 +1560,10 @@
 
   /* 统一入口：构建预览器（错误页会被 WebView 二次提交，故多重重试） */
   function startPreview() {
-    /* 先尝试原生抢占：能成功就没有错误页闪烁，像打开正常网页一样。
-       CSS / BODY / toolScript 此刻都已就绪（同步执行到此处仍是 document-start）。 */
-    if (tryNativeWrite()) return true;
+    /* 直接填充当前 document（不是 document.open/write）。
+       document-start 阶段 document 还是空的，填充后用户第一眼看到的就是工具页，
+       和打开正常网页一样，不存在错误页闪烁。
+       相比 document.write 的好处：不清空文档、不移除监听器，失败也能安全重试。 */
     build();
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () { build(); });
