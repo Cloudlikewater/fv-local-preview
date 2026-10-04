@@ -202,10 +202,172 @@
     p = p.replace(/\*/g, '[\\s\\S]*');
     try { return new RegExp('^' + p + '$', 'i').test(url); } catch (e) { return false; }
   }
+  /* ============================================================
+     精确诊断：把「为什么拿不到 dispatch」的真实状态报出来
+  ============================================================ */
+  window.__fvDiag = function () {
+    var r = {};
+    r.href = String(location.href).slice(0, 120);
+    r.protocol = location.protocol;
+    r.hostname = location.hostname;
+    r.isErrorPage = isErrorPage();
+    r.readyState = document.readyState;
+    try { r.typeof_ChromeXt = (typeof ChromeXt); } catch (e) { r.typeof_ChromeXt = 'throw:' + e.message; }
+    try { r.window_ChromeXt = typeof window.ChromeXt; } catch (e) { r.window_ChromeXt = 'throw'; }
+    try { r.CX_captured = !!window.__fvCX; } catch (e) { r.CX_captured = false; }
+    ['GM_setValue', 'GM_getValue', 'GM_info', 'GM_addStyle'].forEach(function (n) {
+      var v;
+      try { v = eval('typeof ' + n); } catch (e) { v = 'eval-error'; }
+      r['gm_' + n] = v;
+    });
+    try { r.GM_dot = (typeof GM !== 'undefined') ? Object.keys(GM).join(',') : 'undefined'; } catch (e) { r.GM_dot = 'throw'; }
+    // 扫描 window 上的 Symbol
+    var syms = [];
+    try {
+      Object.getOwnPropertySymbols(window).forEach(function (s) {
+        if (/webidl2js|constructor registry/i.test(String(s))) return;
+        var v; try { v = window[s]; } catch (e) { return; }
+        if (v && typeof v === 'object') {
+          syms.push(String(s).replace(/^Symbol\(|\)$/g, '') + ':' + (typeof v.dispatch === 'function' ? 'has-dispatch' : 'obj'));
+        }
+      });
+    } catch (e) {}
+    r.symbols = syms.slice(0, 12);
+    // GM 存储实测
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue('__fv_diag_t', '1');
+        r.gmStoreOk = (typeof GM_getValue === 'function') && GM_getValue('__fv_diag_t', null) === '1';
+      } else r.gmStoreOk = 'GM_setValue undefined';
+    } catch (e) { r.gmStoreOk = 'throw:' + e.message; }
+    try { localStorage.setItem('__fv_t', '1'); r.localStorage = 'ok'; } catch (e) { r.localStorage = 'throw:' + e.message; }
+    return r;
+  };
+
+  /* ============================================================
+     中转安装：错误页上拿不到 ChromeXt.dispatch 时的兜底
+     原理：错误页把待安装脚本存起来，再跳到普通网页；
+           普通网页上 GM 作用域正常，能拿到 dispatch，装完再跳回入口。
+     存储优先用 GM_setValue（浏览器进程，跨 origin）；
+     若 GM 不可用，退化为把代码编码进 URL hash 传递。
+  ============================================================ */
+  var TASK_KEY = 'fv_install_task_v1';
+  var HASH_FLAG = '#fvinstall=';
+  var RELAY_URL = 'https://example.com/';
+
+  function b64enc(str) {
+    try { return btoa(unescape(encodeURIComponent(str))); } catch (e) { return null; }
+  }
+  function b64dec(b) {
+    try { return decodeURIComponent(escape(atob(b))); } catch (e) { return null; }
+  }
+
+  function saveTask(code) {
+    // ① GM 存储（首选，无长度限制）
+    var viaGM = false;
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(TASK_KEY, code);
+        viaGM = (typeof GM_getValue === 'function') && GM_getValue(TASK_KEY, null) === code;
+      }
+    } catch (e) { viaGM = false; }
+    if (viaGM) return { ok: true, via: 'gm' };
+
+    // ② URL hash（不依赖任何存储）
+    var b = b64enc(code);
+    if (b && b.length < 60000) return { ok: true, via: 'url', b64: b };
+    return { ok: false, via: 'none' };
+  }
+
+  function readTask() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        var v = GM_getValue(TASK_KEY, null);
+        if (v) return { code: v, via: 'gm' };
+      }
+    } catch (e) {}
+    try {
+      var h = location.hash || '';
+      if (h.indexOf(HASH_FLAG) === 0) {
+        var c = b64dec(h.slice(HASH_FLAG.length));
+        if (c) return { code: c, via: 'url' };
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function clearTask(via) {
+    try { if (via === 'gm' && typeof GM_setValue === 'function') GM_setValue(TASK_KEY, null); } catch (e) {}
+    try {
+      if (via === 'url' && (location.hash || '').indexOf(HASH_FLAG) === 0) {
+        history.replaceState(null, '', location.pathname + location.search);
+      }
+    } catch (e) {}
+  }
+
+  function doInstallOnNormalPage(task, done) {
+    var CX = null;
+    try { if (typeof ChromeXt !== 'undefined' && ChromeXt && typeof ChromeXt.dispatch === 'function') CX = ChromeXt; } catch (e) {}
+    if (!CX) {
+      try { if (window.ChromeXt && typeof window.ChromeXt.dispatch === 'function') CX = window.ChromeXt; } catch (e) {}
+    }
+    if (!CX) {
+      try {
+        Object.getOwnPropertySymbols(window).forEach(function (s) {
+          if (CX) return;
+          if (/webidl2js|constructor registry/i.test(String(s))) return;
+          var v; try { v = window[s]; } catch (e) { return; }
+          if (v && typeof v.dispatch === 'function') CX = v;
+        });
+      } catch (e) {}
+    }
+    if (!CX) { done(false, '普通网页上也拿不到 dispatch'); return; }
+    try {
+      CX.dispatch('installScript', task.code);
+      try { CX.dispatch('notification', { id: 'fv', uuid: 0, title: 'FV 安装', text: '中转安装已发送', timeout: 2500 }); } catch (e) {}
+      done(true, 'ok');
+    } catch (e) { done(false, e.message); }
+  }
+
+  /* 普通网页上：若存在待安装任务，执行安装后跳回入口 */
+  function tryRelayInstall() {
+    var task = readTask();
+    if (!task) return false;
+    clearTask(task.via);
+    doInstallOnNormalPage(task, function (ok, err) {
+      try {
+        window.__fvRelayResult = ok ? ('安装成功（' + task.via + '）') : ('安装失败：' + err);
+      } catch (e) {}
+      setTimeout(function () {
+        try { location.href = 'https://fv-local-preview.invalid/'; } catch (e) {}
+      }, 1200);
+    });
+    return true;
+  }
+
+  /* 暴露给页面脚本（页面脚本访问不到本作用域的 saveTask / diag） */
+  window.__fvSaveTask = function (code) { try { return saveTask(code); } catch (e) { return { ok: false, via: 'err' }; } };
+  window.__fvDiagText = function () {
+    try {
+      var r = window.__fvDiag();
+      var L = [];
+      L.push('—— 诊断 ——');
+      Object.keys(r).forEach(function (k) {
+        var v = r[k];
+        L.push(k + ': ' + (Array.isArray(v) ? v.join(' | ') : v));
+      });
+      L.push('');
+      L.push('判读：若 typeof_ChromeXt 是 undefined → @grant GM.ChromeXt 未解锁（需重新导入脚本）；');
+      L.push('若 gm_GM_setValue 也是 undefined → 错误页未建立 GM 作用域，属正常现象，用中转安装。');
+      return L.join('\n');
+    } catch (e) { return '诊断失败：' + e.message; }
+  };
+
   var decision = shouldBuildPreview();
 
   if (decision === 'no') {
-    // 普通网页：不构建、不改动，直接退出
+    // 普通网页：先检查有没有中转安装任务，有就执行；否则直接退出、不改动页面
+    tryRelayInstall();
     return;
   }
 
@@ -809,6 +971,17 @@
     }
 
     /* ---------- 真正安装 ---------- */
+    /* ---------- 诊断：显示为什么拿不到 ChromeXt.dispatch ---------- */
+    function showDiag() {
+      var txt = '(诊断不可用)';
+      try { txt = window.__fvDiagText ? window.__fvDiagText() : '(未挂 __fvDiagText)'; } catch (e) { txt = '诊断出错：' + e.message; }
+      instCode.textContent = txt;
+      instTip.textContent = '把以上内容复制发给我即可定位。关键看 typeof_ChromeXt 与 gm_GM_setValue 两行。';
+      mask.classList.remove('on');
+      dlgPanel.style.display = 'none';
+      instPanel.style.display = 'flex';
+    }
+
     function installNow() {
       var meta = readDlgMeta();
       if (!meta.name) { msg('脚本名不能为空'); return; }
@@ -818,7 +991,22 @@
       installName = meta.name + '.user.js';
       var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
       if (!CX || typeof CX.dispatch !== 'function') {
-        msg('未拿到 ChromeXt.dispatch，请确认脚本头含 @grant GM.ChromeXt 且已重新导入');
+        /* 错误页上拿不到 dispatch（GM 作用域未建立）→ 走中转：
+           把脚本存起来，跳到一个普通网页，在那里装完再跳回来。 */
+        var r = null;
+        try { r = window.__fvSaveTask ? window.__fvSaveTask(code) : null; } catch (e) { r = null; }
+        if (r && r.ok) {
+          msg('本页无法直连 ChromeXt，改用中转：正在跳转…（' + (r.via === 'gm' ? 'GM存储' : 'URL携带') + '）');
+          setTimeout(function () {
+            try {
+              location.href = (r.via === 'url')
+                ? ('https://example.com/' + '#fvinstall=' + r.b64)
+                : 'https://example.com/';
+            } catch (e) { msg('跳转失败，请手动打开任意网页完成安装'); }
+          }, 900);
+          return;
+        }
+        msg('未拿到 dispatch 且中转失败，请用菜单「🔍 诊断」查看原因');
         return;
       }
       try {
@@ -1004,6 +1192,7 @@
       var items = [
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '⚡ 安装脚本（可改 @match）', f: openInstallDialog },
+        { t: '🔍 诊断（查为何装不上）', f: showDiag },
         { t: '🖥️ 全屏打开', f: fullOpen },
         { t: '⚙️ 打开 ChromeXt 管理页', f: openManager },
         { t: '🧪 临时试运行（不安装）', f: runJs },
