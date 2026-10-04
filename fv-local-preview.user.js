@@ -16,6 +16,52 @@
 
   if (typeof window.__fvFixedLoaded === 'undefined') { window.__fvFixedLoaded = false; }
 
+  /* ============================================================
+     抢占隐藏，缩短错误页闪烁
+     .invalid 必然解析失败，浏览器会先显示一个错误页 document，
+     我们再把它替换成工具页。这里在 document-start 就抢先把可见性关掉，
+     等构建完成再恢复，让用户几乎看不到那一下错误页。
+  ============================================================ */
+  var __fvFlashGuard = false;
+  function hideNow() {
+    if (__fvFlashGuard) return;
+    __fvFlashGuard = true;
+    try {
+      if (document.documentElement) document.documentElement.style.visibility = 'hidden';
+      if (document.body) document.body.style.visibility = 'hidden';
+      var hs = document.createElement('style');
+      hs.setAttribute('data-fv-flash', '1');
+      hs.textContent = 'html,body{visibility:hidden!important;background:#f5f6fa!important}';
+      (document.head || document.documentElement).appendChild(hs);
+    } catch (e) {}
+  }
+  function showNow() {
+    try {
+      if (document.documentElement) document.documentElement.style.visibility = '';
+      if (document.body) document.body.style.visibility = '';
+      var hs = document.querySelector('style[data-fv-flash]');
+      if (hs && hs.parentNode) hs.parentNode.removeChild(hs);
+    } catch (e) {}
+  }
+
+  /* 只在「看起来是入口」时才抢占：
+     hostname 正确，或错误页文本含入口域名，或刚访问过入口 */
+  var looksLikeEntry = false;
+  try { looksLikeEntry = (location.hostname === 'fv-local-preview.invalid'); } catch (e) {}
+  if (!looksLikeEntry) {
+    try { looksLikeEntry = /fv-local-preview\.invalid/.test(String(location.href)); } catch (e) {}
+  }
+  if (!looksLikeEntry) {
+    try {
+      var pt = document.documentElement ? (document.documentElement.innerText || document.documentElement.textContent || '') : '';
+      looksLikeEntry = pt.indexOf('fv-local-preview.invalid') >= 0;
+    } catch (e) {}
+  }
+  if (!looksLikeEntry) {
+    try { looksLikeEntry = String(location.protocol).toLowerCase() === 'chrome-error:'; } catch (e) {}
+  }
+  if (looksLikeEntry) hideNow();
+
   /* 取「页面真实 window」：@grant 非 none 时 GM 会建沙箱，
      本脚本里的 window 是被包装过的影子对象，挂属性页面脚本看不到。
      unsafeWindow 是标准解法，拿不到就退回 window。 */
@@ -206,17 +252,6 @@
     return 'no';
   }
 
-  function parseMatches(code) {
-    var out = [], re = /^\s*\/\/\s*@match\s+(\S+)\s*$/gm, m;
-    while ((m = re.exec(code)) !== null) out.push(m[1]);
-    return out.length ? out : ['*://*/*'];
-  }
-  function patternHit(pattern, url) {
-    if (pattern === '*' || pattern === '*://*/*') return true;
-    var p = String(pattern).replace(/[.+^${}()|[\]\\?]/g, function (c) { return '\\' + c; });
-    p = p.replace(/\*/g, '[\\s\\S]*');
-    try { return new RegExp('^' + p + '$', 'i').test(url); } catch (e) { return false; }
-  }
   /* ============================================================
      精确诊断：把「为什么拿不到 dispatch」的真实状态报出来
   ============================================================ */
@@ -266,46 +301,19 @@
 
   /* ============================================================
      中转安装：错误页上拿不到 ChromeXt.dispatch 时的兜底
-     原理：错误页把待安装脚本存起来，再跳到普通网页；
-           普通网页上 GM 作用域正常，能拿到 dispatch，装完再跳回入口。
-     存储优先用 GM_setValue（浏览器进程，跨 origin）；
-     若 GM 不可用，退化为把代码编码进 URL hash 传递。
+     原理：错误页上拿不到 dispatch（GM 作用域未建立）时，
+     把脚本 base64 编码进 URL hash，跳到普通网页；
+     普通网页上 GM 作用域正常，能拿到 dispatch，装完再跳回入口。
+     不依赖任何存储或 window 桥，跨沙箱一定可用。
   ============================================================ */
   var TASK_KEY = 'fv_install_task_v1';
   var HASH_FLAG = '#fvinstall=';
-  var RELAY_URL = 'https://example.com/';
 
-  function b64enc(str) {
-    try { return btoa(unescape(encodeURIComponent(str))); } catch (e) { return null; }
-  }
   function b64dec(b) {
     try { return decodeURIComponent(escape(atob(b))); } catch (e) { return null; }
   }
 
-  function saveTask(code) {
-    // ① GM 存储（首选，无长度限制）
-    var viaGM = false;
-    try {
-      if (typeof GM_setValue === 'function') {
-        GM_setValue(TASK_KEY, code);
-        viaGM = (typeof GM_getValue === 'function') && GM_getValue(TASK_KEY, null) === code;
-      }
-    } catch (e) { viaGM = false; }
-    if (viaGM) return { ok: true, via: 'gm' };
-
-    // ② URL hash（不依赖任何存储）
-    var b = b64enc(code);
-    if (b && b.length < 60000) return { ok: true, via: 'url', b64: b };
-    return { ok: false, via: 'none' };
-  }
-
   function readTask() {
-    try {
-      if (typeof GM_getValue === 'function') {
-        var v = GM_getValue(TASK_KEY, null);
-        if (v) return { code: v, via: 'gm' };
-      }
-    } catch (e) {}
     try {
       var h = location.hash || '';
       if (h.indexOf(HASH_FLAG) === 0) {
@@ -316,13 +324,22 @@
     return null;
   }
 
-  function clearTask(via) {
-    try { if (via === 'gm' && typeof GM_setValue === 'function') GM_setValue(TASK_KEY, null); } catch (e) {}
+  function clearTask() {
     try {
-      if (via === 'url' && (location.hash || '').indexOf(HASH_FLAG) === 0) {
+      if ((location.hash || '').indexOf(HASH_FLAG) === 0) {
         history.replaceState(null, '', location.pathname + location.search);
       }
     } catch (e) {}
+  }
+  function readTask() {
+    try {
+      var h = location.hash || '';
+      if (h.indexOf(HASH_FLAG) === 0) {
+        var c = b64dec(h.slice(HASH_FLAG.length));
+        if (c) return { code: c, via: 'url' };
+      }
+    } catch (e) {}
+    return null;
   }
 
   function doInstallOnNormalPage(task, done) {
@@ -353,7 +370,7 @@
   function tryRelayInstall() {
     var task = readTask();
     if (!task) return false;
-    clearTask(task.via);
+    clearTask();
     doInstallOnNormalPage(task, function (ok, err) {
       try {
         window.__fvRelayResult = ok ? ('安装成功（' + task.via + '）') : ('安装失败：' + err);
@@ -387,7 +404,6 @@
     } catch (e) { return '诊断失败：' + e.message; }
   }
 
-  window.__fvSaveTask = function (code) { try { return saveTask(code); } catch (e) { return { ok: false, via: 'err' }; } };
   window.__fvDiagText = diagText;
 
   /* 把诊断结果写进 DOM 属性（最可靠的桥） */
@@ -397,7 +413,6 @@
       document.documentElement.setAttribute('data-fv-diag', t);
       try { REAL_WIN.__fvDiagText = diagText; } catch (e) {}
       try { REAL_WIN.__fvDiag = window.__fvDiag; } catch (e) {}
-      try { REAL_WIN.__fvSaveTask = window.__fvSaveTask; } catch (e) {}
     } catch (e) {}
   }
   pushDiagToDom();
@@ -409,23 +424,54 @@
   }
   window.addEventListener('load', function () { grabCX(); pushDiagToDom(); });
 
+  /* ============================================================
+     原生抢占：趁浏览器还没提交错误页，直接写出完整页面
+     早期版本能「像正常网页一样直接显示」就是靠这招：
+     document-start 时 location 仍是入口地址、document 尚未被替换，
+     此刻 document.write 会把内容写进「当前这个 document」，
+     浏览器就不会再提交 ERR_NAME_NOT_RESOLVED 错误页 —— 没有闪烁。
+     若抢占失败（错误页已提交 / write 被拒），自动回退到下面的
+     DOM 替换 + 多重重试逻辑。
+  ============================================================ */
+  function tryNativeWrite() {
+    try {
+      if (location.hostname !== 'fv-local-preview.invalid') return false;
+      if (document.readyState !== 'loading') return false;
+      var page = '<!doctype html><html lang="zh"><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes">' +
+        '<title>FV 本地文件预览</title><style>' + CSS + '</style></head><body>' +
+        BODY +
+        '<' + 'script>(' + toolScript.toString() + ')();<' + '/script>' +
+        '</body></html>';
+      document.open();
+      document.write(page);
+      document.close();
+      var okp = !!document.getElementById('fv-file');
+      if (okp) { showNow(); }
+      return okp;
+    } catch (e) {
+      return false;
+    }
+  }
+
   var decision = shouldBuildPreview();
 
   if (decision === 'no') {
     // 普通网页：先检查有没有中转安装任务，有就执行；否则直接退出、不改动页面
     tryRelayInstall();
+    showNow();   /* 若之前抢占隐藏过，务必恢复，避免页面永久空白 */
     return;
   }
 
   if (decision === 'maybe') {
-    // 错误页刚注入、文本还没渲染：轮询等待确认归属，最多约 3 秒
-    var probe = [50, 100, 200, 400, 800, 1500, 3000], pi = 0;
+    // 错误页刚注入、文本还没渲染：快速轮询确认归属，最多约 1.2 秒
+    var probe = [0, 20, 40, 80, 150, 300, 600, 1200], pi = 0;
     (function nextProbe() {
       var d2 = shouldBuildPreview();
       if (d2 === 'yes') { startPreview(); return; }
-      if (d2 === 'no') { return; }
+      if (d2 === 'no') { showNow(); return; }
       if (pi < probe.length) { setTimeout(nextProbe, probe[pi++]); }
-      // 超时仍未确认 → 放弃，不改动页面
+      else { showNow(); }   /* 超时放弃，必须恢复可见，否则页面一直是空白 */
     })();
     return;
   }
@@ -444,7 +490,8 @@
         overlay = $('fv-overlay'), ovFrame = $('fv-ov-frame'), ovTip = $('fv-ov-tip'),
         ovDl = $('fv-ov-dl');
 
-    var lastText = '', lastName = '', lastKind = '', lastFile = null, lastBlob = null;
+    var lastText = '', lastName = '', lastKind = '', lastFile = null, lastBlob = null, lastOvUrl = null;
+    var ovLast = null;   // 最近一次全屏的信息，供诊断使用
     var S1 = '<' + 'script>', S2 = '<' + '/script>';
 
     /* ---------- 基础 ---------- */
@@ -515,40 +562,57 @@
     function td(enc, bytes) { return new TextDecoder(enc).decode(bytes); }
 
     /* ---------- 全屏覆盖层（替代 window.open / data: 顶层导航） ---------- */
-    function getOvSrc() {
-      var p = document.getElementById('fv-ov-src');
-      if (!p) {
-        p = document.createElement('pre');
-        p.id = 'fv-ov-src';
-        p.style.cssText = 'flex:1;overflow:auto;margin:0;padding:12px;background:#fff;color:#333;' +
-          'font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all;' +
-          '-webkit-user-select:text;user-select:text';
-        overlay.appendChild(p);
-      }
-      return p;
+    /* 统一用 blob URL 渲染，不再用 srcdoc：
+       部分 WebView 对 srcdoc 里的 <script> 支持不完整（js 全屏白屏），
+       blob 走的是正常文档加载路径，脚本能执行，且可显式指定 charset。 */
+    function makeBlobUrl(text, mime) {
+      try {
+        if (lastOvUrl) { try { URL.revokeObjectURL(lastOvUrl); } catch (e) {} lastOvUrl = null; }
+        var b = new Blob([text], { type: (mime || 'text/html') + ';charset=utf-8' });
+        lastOvUrl = URL.createObjectURL(b);
+        return lastOvUrl;
+      } catch (e) { return null; }
     }
-    function showOvSrc(on) { getOvSrc().style.display = on ? 'block' : 'none'; ovFrame.style.display = on ? 'none' : 'block'; }
-    function openFull(html, blobUrl, tip, dlName) {
+    /* 给原样渲染的 html 智能注入 viewport：没有 viewport 的文档在手机上
+       会按 980px 虚拟宽度缩小显示，看起来又小又不清晰。 */
+    function withViewport(html) {
+      try {
+        if (/<meta[^>]+name\s*=\s*["']?viewport/i.test(html)) return html;
+        var vp = '<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes">';
+        var m = html.match(/<head[^>]*>/i);
+        if (m) return html.slice(0, m.index + m[0].length) + vp + html.slice(m.index + m[0].length);
+        if (/^\s*<!doctype/i.test(html)) {
+          var h = html.match(/<html[^>]*>/i);
+          if (h) return html.slice(0, h.index + h[0].length) + '<head>' + vp + '</head>' + html.slice(h.index + h[0].length);
+        }
+        return '<!doctype html><html><head><meta charset="utf-8">' + vp + '</head><body>' + html + '</body></html>';
+      } catch (e) { return html; }
+    }
+    /* mime 必须是合法 MIME；noViewport=true 时跳过 viewport 注入
+       （SVG 是 XML 文档，插入 HTML 的 <meta> 会破坏结构导致白屏） */
+    function openFull(text, blobUrl, tip, dlName, mime, noViewport) {
       hideAll();
       overlay.style.display = 'flex';
       ovTip.style.display = tip ? 'block' : 'none';
       ovTip.textContent = tip || '';
-      showOvSrc(false);
-      if (blobUrl) {
-        ovDl.style.display = dlName ? 'inline-block' : 'none';
-        if (dlName) { ovDl.setAttribute('data-name', dlName); }
-        try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
-        ovFrame.src = blobUrl;
-      } else {
-        ovDl.style.display = 'none';
-        try { ovFrame.removeAttribute('src'); } catch (e) {}
-        ovFrame.srcdoc = html || '';
+      ovFrame.style.display = 'block';
+      ovDl.style.display = dlName ? 'inline-block' : 'none';
+      if (dlName) ovDl.setAttribute('data-name', dlName);
+      try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
+      var url = blobUrl;
+      if (!url && text) {
+        var body = noViewport ? text : withViewport(text);
+        url = makeBlobUrl(body, mime || 'text/html');
       }
+      if (url) { ovFrame.src = url; }
+      else { ovFrame.srcdoc = text || ''; }   // 最终兜底
+      ovLast = { mime: mime || 'text/html', len: (text || '').length, url: url || '', srcDoc: !url };
     }
     function closeFull() {
       overlay.style.display = 'none';
       try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
       try { ovFrame.src = 'about:blank'; } catch (e) {}
+      try { if (lastOvUrl) { URL.revokeObjectURL(lastOvUrl); lastOvUrl = null; } } catch (e) {}
       // 若地址被改成 .user.js 结尾，退出时还原，避免残留
       try {
         if (location.href.indexOf('.user.js') >= 0) history.replaceState(null, '', '/');
@@ -559,17 +623,32 @@
         else if (lastBlob && lastFile) route(lastFile, '');
       } catch (e) {}
     }
-    function backBtn() {
-      /* 内容里不再内嵌返回按钮：srcdoc 内的 onclick 依赖 window.parent，
-         在部分内核/沙箱下会失效或报错。统一用顶部常驻的「✕ 退出全屏」。 */
-      return '';
+    /* Markdown 样式（与外层 CSS 中 #fv-md 的规则一致），供全屏文档内联使用 */
+    var MD_CSS = 'html,body{margin:0}body{background:#fff}' +
+      '#fv-md{padding:18px 22px;background:#fff;font:14px/1.6 system-ui;color:#333}' +
+      '#fv-md h1,#fv-md h2,#fv-md h3,#fv-md h4{color:#1f2d3d;margin:16px 0 8px}' +
+      '#fv-md h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
+      '#fv-md p{margin:8px 0}' +
+      '#fv-md a{color:#2f7d63}' +
+      '#fv-md code{background:#f0f2f5;padding:1px 5px;border-radius:4px;color:#c0341d;font-family:Consolas,monospace}' +
+      '#fv-md pre{background:#0f1115;color:#d6deeb;padding:12px;border-radius:8px;overflow:auto}' +
+      '#fv-md pre code{background:transparent;color:inherit}' +
+      '#fv-md blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
+      '#fv-md img{max-width:100%;border-radius:6px}' +
+      '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}';
+
+    /* Markdown 完整文档：全屏与普通预览共用，保证两处显示完全一致 */
+    function MD_DOC(inner, title) {
+      return '<!doctype html><html><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<title>' + esc(title || 'FV预览') + '</title><style>' + MD_CSS + '</style></head><body>' +
+        '<div id="fv-md">' + inner + '</div></body></html>';
     }
     function wrapDoc(body, title) {
       return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' +
         esc(title || 'FV预览') + '</title><style>html,body{margin:0}body{background:#fff;font:14px/1.6 system-ui;padding:12px}</style></head><body>' +
         body + '</body></html>';
     }
-    window.__fvClose = closeFull;
 
     /* ---------- 各类渲染 ---------- */
     function renderHtml(t) { lastKind = 'html'; showFrameSrc(t); msg('已打开：' + lastName + '（相对路径资源可能加载失败）'); }
@@ -808,6 +887,7 @@
     function fullOpen() {
       if (!lastFile) { msg('请先选择文件'); return; }
       var e = ext();
+
       if (lastKind === 'image' || lastKind === 'audio' || lastKind === 'video') {
         if (!lastBlob) { msg('当前环境无法全屏预览此媒体'); return; }
         openFull('', lastBlob, '', lastName);
@@ -818,8 +898,9 @@
         openFull('', lastBlob, '若下方空白，说明内核不支持内嵌 PDF。', lastName);
         return;
       }
+      /* md：全屏与非全屏用同一套渲染结果，避免两处样式不一致 */
       if (lastKind === 'md') {
-        openFull(wrapDoc('<article style="max-width:760px;margin:0 auto">' + mdToHtml(lastText) + '</article>', lastName));
+        openFull(MD_DOC(mdToHtml(lastText), lastName));
         return;
       }
       if (lastKind === 'csv') {
@@ -832,26 +913,60 @@
         openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px Consolas,monospace">' + esc(o) + '</pre>', lastName));
         return;
       }
-      /* ★ html/xhtml/htm/svg/xml：原文直接渲染，绝不包裹。
-         之前用 wrapDoc 把自带 <!doctype><html><head> 的文档又套一层
-         <html><body>，造成标签嵌套，解析器把结构搞乱 → 显示异常。
-         顶部已常驻「✕ 退出全屏」，无需在内容里再塞返回按钮。 */
+      /* html/htm/xhtml/xml/xsl：原文原样渲染，绝不包裹（嵌套标签会破坏结构）。
+         withViewport 会智能补 viewport，避免手机上按 980px 缩小。 */
       if (e === 'html' || e === 'htm' || e === 'xhtml' || e === 'xht' ||
-          e === 'svg' || e === 'xml' || e === 'xsl' || e === 'xslt' ||
+          e === 'xml' || e === 'xsl' || e === 'xslt' ||
           /^\s*<(!DOCTYPE|html|\?xml)/i.test(String(lastText).trim())) {
-        openFull(lastText);
+        openFull(lastText, null, '', null, 'text/html', false);
         return;
       }
+      /* svg：用 image/svg+xml 的 blob 渲染，而不是当 html 塞进去 */
+      if (e === 'svg') {
+        openFull(lastText, null, '', null, 'image/svg+xml', true);
+        return;
+      }
+      /* js：全屏运行。用 blob 而非 srcdoc，脚本才会真正执行（srcdoc 白屏的修复点）。
+         顶部固定提示条说明执行状态，并把 console 输出回显，
+         避免「脚本其实执行了但没有任何可见内容」被误判为白屏。 */
       if (e === 'js' || e === 'mjs') {
         var safe = String(lastText).replace(/<\/script>/gi, '<\\/script>');
-        openFull('<!doctype html><html><head><meta charset="utf-8"><style>body{background:#fff;font:14px system-ui;padding:16px}</style></head><body>' +
-          '<div id="fv-app"></div>' +
-          S1 + 'try{' + safe + '}catch(err){document.body.insertAdjacentHTML("beforeend","<pre style=color:red>Error: "+err.message+"</pre>")}' + S2 +
+        openFull('<!doctype html><html><head><meta charset="utf-8">' +
+          '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+          '<style>html,body{margin:0}body{background:#fff;font:14px/1.6 system-ui;padding:16px}' +
+          '#fvbar{position:fixed;top:0;left:0;right:0;z-index:9999998;background:#2f7d63;color:#fff;' +
+          'font:13px system-ui;padding:8px 12px;box-shadow:0 2px 6px rgba(0,0,0,.15)}' +
+          '#fvbar b{font-weight:700}#er{color:#c00;white-space:pre-wrap;margin-top:12px}' +
+          '#fvout{white-space:pre-wrap;background:#f5f6fa;border:1px solid #e5e7eb;border-radius:8px;' +
+          'padding:10px;margin-top:12px;font:12px/1.6 Consolas,monospace}</style></head><body>' +
+          '<div id="fvbar"><b>JS 已执行</b> · <span id="fvstate">运行中…</span></div>' +
+          '<div id="fv-app" style="margin-top:44px"></div>' +
+          S1 +
+          'var __logs=[];' +
+          'var _c={log:function(){__logs.push([].slice.call(arguments).join(" "))},' +
+          'warn:function(){__logs.push("[warn] "+[].slice.call(arguments).join(" "))},' +
+          'error:function(){__logs.push("[error] "+[].slice.call(arguments).join(" "))}};' +
+          'var __out=[];var _d=document;' +
+          'var _w=function(){try{_d.body.insertAdjacentHTML("beforeend","")}catch(e){}};' +
+          'try{' + safe +
+          '}catch(err){var p=_d.createElement("pre");p.id="er";' +
+          'p.textContent="Error: "+(err&&err.message||err);_d.body.appendChild(p);}' +
+          'setTimeout(function(){' +
+          '  var st=_d.getElementById("fvstate");' +
+          '  var n=(_d.getElementById("fv-app")||{}).childNodes?_d.getElementById("fv-app").childNodes.length:0;' +
+          '  if(st){st.textContent=(n>0?("已生成 "+n+" 个元素"):"脚本已执行，无可见输出");}' +
+          '  if(__logs.length){var o=_d.createElement("div");o.id="fvout";' +
+          '    o.textContent="console 输出：\n"+__logs.join("\n");_d.body.appendChild(o);}' +
+          '},120);' +
+          S2 +
           '</body></html>');
-        msg('已全屏运行 JS');
+        msg('已全屏运行 JS（顶部有执行状态提示）');
         return;
       }
-      openFull(wrapDoc(lastText, lastName));
+      /* 其余（txt / 未知扩展名）：按代码高亮转义后全屏。
+         之前直接塞 lastText 未转义，源码里的 < > 会被当 HTML 解析导致显示错乱。 */
+      openFull(wrapDoc('<pre style="white-space:pre-wrap;font:13px/1.6 Consolas,monospace">' +
+        codeHtml(lastText) + '</pre>', lastName));
     }
 
     /* ---------- 安装为 ChromeXt 脚本 ---------- */
@@ -897,7 +1012,6 @@
          即写入 SQLite 数据库 —— 持久化、重启仍在、出现在 ChromeXt 脚本列表。
          已实测成功。payload 必须是含 // ==UserScript== 的完整脚本文本。
     ============================================================ */
-    var ST = window.__fvStore;   // 外层挂的存储层（GM 优先，跨 origin 共享）
 
     /* ---------- 元数据解析：把已有 UserScript 头读成字段 ---------- */
     function parseMeta(code) {
@@ -1028,8 +1142,36 @@
       // ② window 上的函数
       if (!txt) { try { txt = window.__fvDiagText ? window.__fvDiagText() : ''; } catch (e) {} }
       if (!txt) txt = '(诊断未生成：外层脚本未执行到挂载点，或 DOM 桥不可用)';
+
+      /* ---- 追加全屏诊断：定位「白屏」到底卡在哪一环 ---- */
+      var L = ['', '—— 全屏诊断 ——'];
+      try {
+        L.push('当前文件: ' + (lastName || '(无)') + '  类型: ' + (lastKind || '-'));
+        L.push('内容长度: ' + (lastText ? lastText.length : 0) + ' 字符');
+        if (!ovLast) {
+          L.push('尚未打开过全屏');
+        } else {
+          L.push('上次全屏 MIME: ' + ovLast.mime + (ovLast.mime.indexOf(';') >= 0 ? '' : ' (+charset=utf-8)'));
+          L.push('上次全屏 文本长度: ' + ovLast.len);
+          L.push('使用方式: ' + (ovLast.srcDoc ? 'srcdoc（可能被拦截脚本）' : 'blob URL（正常）'));
+          L.push('blob URL: ' + (ovLast.url ? ovLast.url.slice(0, 40) : '(无)'));
+          var of = document.getElementById('fv-ov-frame');
+          if (of) {
+            L.push('iframe src: ' + String(of.src || '(空)').slice(0, 40));
+            var bd = null, bl = -1;
+            try { bd = of.contentDocument; if (bd && bd.body) bl = bd.body.innerHTML.length; } catch (e) {}
+            L.push('iframe body 长度: ' + (bl < 0 ? '无法读取(跨域/未加载)' : bl));
+            if (bl === 0) L.push('⚠ body 为空 → 可能是 MIME 错误或文档未渲染');
+          }
+          L.push('判定：MIME 必须是 text/html 或 image/svg+xml 等合法类型；');
+          L.push('      显示 raw;charset=utf-8 之类即为 BUG，浏览器会拒绝渲染。');
+        }
+        L.push('');
+        L.push('提示：js 全屏后顶部有绿色状态条，显示「脚本已执行，无可见输出」属正常。');
+      } catch (e) { L.push('全屏诊断出错: ' + e.message); }
+      txt += '\n' + L.join('\n');
       instCode.textContent = txt;
-      instTip.textContent = '把以上内容复制发给我即可定位。关键看 typeof_ChromeXt 与 gm_GM_setValue 两行。';
+      instTip.textContent = '把以上内容复制发给我即可定位。上半看 typeof_ChromeXt（安装能力），下半看全屏 MIME 与 iframe body 长度（白屏原因）。';
       mask.classList.remove('on');
       dlgPanel.style.display = 'none';
       instPanel.style.display = 'flex';
@@ -1088,140 +1230,8 @@
       }, 300);
     }
 
-    /* ★★ 分享安装（最有希望的一条）：
-       ChromeXt 官方 README 明确写了：The application ChromeXt is able to
-       received shared texts / open JavaScript files to install them as UserScripts.
-       网页可用 Web Share API Level 2 把 .user.js 文件直接分享给 ChromeXt，
-       由 ChromeXt 自己完成安装 —— 这是唯一「网页 → App」的真实通道，
-       不需要文件管理器、不需要长按菜单、不需要真实导航。 */
-    function shareInstall() {
-      if (!lastText) { msg('请先选择 js 文件'); return; }
-      installCode = buildUserScript(lastText, lastName);
-      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
 
-      var nav = navigator;
-      if (!nav.share || !nav.canShare) {
-        msg('当前浏览器不支持 Web Share（无法分享文件），请用复制方式');
-        return;
-      }
-      var file;
-      try {
-        file = new File([installCode], installName, { type: 'text/javascript' });
-      } catch (e) {
-        try { file = new Blob([installCode], { type: 'text/javascript' }); } catch (e2) { file = null; }
-      }
-      if (!file) { msg('无法构造文件，请用复制方式'); return; }
 
-      var payload = { files: [file], title: installName, text: installName };
-      if (!nav.canShare(payload)) {
-        payload = { files: [file] };
-        if (!nav.canShare(payload)) {
-          msg('系统不允许分享此文件类型，请用复制方式');
-          return;
-        }
-      }
-      msg('正在唤起分享面板，请选择 ChromeXt');
-      nav.share(payload).then(function () {
-        msg('已分享，若 ChromeXt 打开则按其提示安装');
-      }).catch(function (err) {
-        if (err && err.name === 'AbortError') msg('已取消分享');
-        else msg('分享失败：' + (err && err.message || err) + '，请用复制方式');
-      });
-    }
-
-    /* ★ 直接安装（无确认）—— 复用同一条真安装通道 */
-    function installViaChromeXt() {
-      if (!lastText) { msg('请先选择 js 文件'); return; }
-      var meta = autoMeta();
-      var code = composeCode(meta);
-      installCode = code;
-      installName = meta.name + '.user.js';
-      var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
-      if (!CX || typeof CX.dispatch !== 'function') {
-        msg('未拿到 ChromeXt.dispatch，请确认脚本头含 @grant GM.ChromeXt 且已重新导入');
-        return;
-      }
-      try {
-        CX.dispatch('installScript', code);
-        msg('已安装：' + meta.name + '（@match ' + meta.matches.join(', ') + '）');
-      } catch (e) {
-        msg('安装失败：' + e.message);
-      }
-    }
-
-    /* 主方案：把当前页变成「脚本源码页」，再用 ChromeXt 的 Install UserScript 菜单安装。
-       不需要导航，因此不受 data:/blob: 顶层导航限制，也不会白屏。 */
-    function renderInstallSourcePage() {
-      if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
-      hideAll();
-      overlay.style.display = 'flex';
-      ovTip.style.display = 'block';
-      ovTip.textContent = '当前页已变成脚本源码页。请长按页面空白处 → ChromeXt 菜单 → ' +
-        'Install UserScript（若菜单项是「编辑」，可先在页面里改好再装）。装完点「✕ 退出全屏」返回。';
-      ovDl.style.display = 'none';
-      showOvSrc(true);
-      getOvSrc().textContent = installCode;
-      msg('已生成源码页，请长按页面使用 ChromeXt 菜单安装');
-    }
-
-    /* ★ 跳转 Install UserScript：用 history.pushState 把地址栏改成 .user.js 结尾，
-       页面不刷新（因此不会触发 DNS 失败、不会白屏）。ChromeXt 靠 onUpdateUrl 监听地址变化，
-       历史记录变更同样会触发，它看到 .user.js 结尾就会弹安装提示；
-       同时页面已渲染成脚本源码供其读取。pushState 不可用时回退到改 hash。 */
-    function pushStateInstall() {
-      if (!lastText) { msg('请先选择 js 文件'); return; }
-      installCode = buildUserScript(lastText, lastName);
-      installName = (String(lastName).replace(/\.(js|mjs)$/i, '') || 'fv-script') + '.user.js';
-
-      var changed = false;
-      try {
-        history.pushState(null, '', '/' + encodeURIComponent(installName));
-        changed = location.href.indexOf('.user.js') >= 0;
-      } catch (e) { changed = false; }
-      if (!changed) {
-        try {
-          location.hash = encodeURIComponent(installName);
-          changed = location.href.indexOf('.user.js') >= 0;
-        } catch (e) { changed = false; }
-      }
-
-      renderInstallSourcePage();
-      if (changed) {
-        ovTip.textContent = '地址已改为 .user.js 结尾（页面未刷新）。若 ChromeXt 弹出安装提示，确认即可；' +
-          '装完点右上角「✕ 退出全屏」。没弹提示就长按页面空白处用 ChromeXt 菜单安装。';
-        msg('地址已切换为 .user.js，等待 ChromeXt 安装提示');
-      } else {
-        msg('无法修改地址，请长按源码页用 ChromeXt 菜单安装');
-      }
-    }
-
-    /* 兜底：blob 导航（多数情况无效，仅保留） */
-    function tryDirectInstall() {
-      if (!installCode) { msg('请先点「安装脚本」生成代码'); return; }
-      var nav = null;
-      try {
-        var b = new Blob([installCode], { type: 'text/plain;charset=utf-8' });
-        nav = URL.createObjectURL(b);
-      } catch (e) { nav = null; }
-      if (!nav) { msg('当前环境无法构造链接，请用源码页或下载方式'); return; }
-      var target = nav + '#' + encodeURIComponent(installName || 'script.user.js');
-      msg('已尝试跳转（若没反应属正常，请用「源码页」或下载方式）');
-      setTimeout(function () {
-        try { location.href = target; } catch (e) {
-          try { var w2 = window.open(target, '_blank'); if (w2) { msg('已尝试新窗口'); } } catch (e2) { msg('跳转被拦截'); }
-        }
-      }, 300);
-    }
-
-    /* 复制 file:// 路径：给能正常渲染 file:// 的浏览器（如打了补丁的 Chrome）用，
-       在地址栏打开这个 URL，ChromeXt 会因 .user.js 后缀弹安装提示。 */
-    function copyFilePath() {
-      if (!installName) { msg('请先点「安装脚本」生成'); return; }
-      var p = 'file:///sdcard/Download/' + installName;
-      copyText(p, function (ok) { msg(ok ? '已复制 ' + p : '复制失败，请手动记下：' + p); });
-    }
-
-    /* 下载已移除：fv 无法用 ChromeXt 打开下载文件，且 file:// 不弹安装提示 */
 
     function runJs() {
       if (!lastText) { msg('请先选择文件'); return; }
@@ -1293,11 +1303,9 @@
       else msg('请先选择文件');
     };
     $('fv-home').onclick = function () { location.href = 'https://fv-local-preview.invalid/'; };
-    $('fv-inst-btn').onclick = openInstallDialog;
     $('fv-copy').onclick = function () {
       copyText(installCode, function (ok) { msg(ok ? '已复制到剪贴板' : '复制失败，请长按代码手动复制'); });
     };
-    $('fv-srcpage').onclick = renderInstallSourcePage;
     $('fv-mgr2').onclick = openManager;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-dlg-install').onclick = installNow;
@@ -1366,11 +1374,11 @@
     '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}' +
     '.jk{color:#0077aa}.js{color:#d14}.jn{color:#c18401}.jb{color:#8250df}' +
     '.ck{color:#c792ea}.cs{color:#0a7d34}.cc{color:#7a8290}.cn{color:#c18401}' +
-    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483645;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
+    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483647;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
     '#fv-toast.on{opacity:1}' +
-    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483646;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
+    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483645;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
     '#fv-fab:active{width:45px;opacity:1}' +
-    '#fv-mask{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
+    '#fv-mask{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
     '#fv-mask.on{display:flex}' +
     '#fv-card{width:88%;max-width:420px;max-height:78vh;overflow:auto;background:rgba(255,255,255,.95);border:1px solid rgba(255,255,255,.6);border-radius:24px;padding:16px;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;animation:pop .3s cubic-bezier(.34,1.56,.64,1)}' +
     '@keyframes pop{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}' +
@@ -1379,14 +1387,14 @@
     '.mi:hover{background:#2f7d63;color:#fff}' +
     '.mi:active{transform:scale(.97)}' +
     '.mi.close{background:#fdecec;color:#c0392b}' +
-    '#fv-inst{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-inst{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
     '#fv-inst .ih,#fv-overlay .oh{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
     '#fv-inst .tip{padding:8px 12px;color:#666;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
     '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text}' +
-    '#fv-overlay{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column}' +
+    '#fv-overlay{position:fixed;inset:0;z-index:2147483644;background:#fff;display:none;flex-direction:column}' +
     '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
     '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
-    '#fv-dlg{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-dlg{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
     '#fv-dlg .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
     '#fv-dlg-tip{padding:8px 12px;color:#8a6d3b;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
     '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
@@ -1397,7 +1405,6 @@
       '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
         '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
       '</span>' +
-      '<button class="btn" id="fv-inst-btn">⚡ 安装脚本</button>' +
       '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
       '<button class="btn sec" id="fv-reload">重载</button>' +
       '<button class="btn ghost" id="fv-home">首页</button>' +
@@ -1416,7 +1423,6 @@
         '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
         '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
         '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
-        '<button class="btn sec" id="fv-srcpage">📄 源码页查看</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-inst-tip"></div>' +
@@ -1468,11 +1474,23 @@
       try { doc.title = 'FV 本地文件预览'; } catch (e) {}
       try { doc.documentElement.style.cssText = 'background:#f5f6fa;min-height:100vh;'; } catch (e) {}
 
+      /* 关键：补 viewport。错误页 document 没有 viewport meta，
+         手机上会按 980px 虚拟宽度缩小，导致界面又小又糊。 */
+      try {
+        var oldVp = doc.querySelector('meta[name="viewport"]');
+        if (oldVp && oldVp.parentNode) oldVp.parentNode.removeChild(oldVp);
+        var vp = doc.createElement('meta');
+        vp.setAttribute('name', 'viewport');
+        vp.setAttribute('content', 'width=device-width,initial-scale=1,maximum-scale=5,user-scalable=yes');
+        doc.head.appendChild(vp);
+      } catch (e) {}
+
       var st = doc.createElement('style');
       st.textContent = CSS;
       doc.head.appendChild(st);
 
       doc.body.innerHTML = BODY;
+      showNow();   /* 内容已就位，解除隐藏 */
 
       var sc = doc.createElement('script');
       sc.textContent = '(' + toolScript.toString() + ')();';
@@ -1495,12 +1513,15 @@
 
   /* 统一入口：构建预览器（错误页会被 WebView 二次提交，故多重重试） */
   function startPreview() {
+    /* 先尝试原生抢占：能成功就没有错误页闪烁，像打开正常网页一样。
+       CSS / BODY / toolScript 此刻都已就绪（同步执行到此处仍是 document-start）。 */
+    if (tryNativeWrite()) return true;
     build();
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () { build(); });
     }
     window.addEventListener('load', function () { build(); });
-    schedule([0, 30, 80, 150, 300, 600, 1000, 2000]);
+    schedule([0, 20, 50, 100, 200, 400, 800, 1500]);
   }
 
   startPreview();
