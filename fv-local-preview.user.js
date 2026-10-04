@@ -1,282 +1,367 @@
 // ==UserScript==
-// @name         ChromeXt 内部接口探测器（只读，不改任何东西）
+// @name         ChromeXt 接口探测器 v2（增强版·只读）
 // @namespace    com.example.fv
-// @version      1.0
-// @description  扫描 window 上的自有属性 / Symbol 属性 / 嵌套对象，找出 ChromeXt 暴露的内部接口并 dump 出所有方法与字段，便于确认是否存在写入脚本库的入口。全程只读。
+// @version      2.0
+// @description  带完整 grant 的只读探测：GM API 家族、GM 命名空间、ChromeXt 对象本体、window Symbol、FV 的 globalfooviewobject、存储读写实测、环境信息。列出方法但绝不调用未知 action。
 // @match        *://*/*
 // @match        file:///*
 // @run-at       document-start
-// @grant        none
+// @grant        GM.ChromeXt
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM_addStyle
+// @grant        GM_openInTab
+// @grant        GM_notification
+// @grant        GM_setClipboard
+// @grant        GM_getResourceText
+// @grant        GM_getResourceURL
+// @grant        GM_addElement
+// @grant        GM_cookie
+// @grant        GM_webRequest
+// @grant        GM_info
+// @grant        window.close
+// @grant        window.focus
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  if (window.__cxProbeLoaded) return;
-  window.__cxProbeLoaded = true;
+  if (window.__cxProbe2Loaded) return;
+  window.__cxProbe2Loaded = true;
 
-  // 关心的关键词：命中即高亮
-  var KEYWORDS = [
-    'command', 'script', 'install', 'insert', 'dispatch', 'post',
-    'parse', 'db', 'database', 'local', 'chrome', 'xt', 'gm',
-    'user', 'menu', 'storage', 'value', 'save', 'add', 'remove', 'delete', 'update'
-  ];
-  // 明确想找的「写入类」方法名
-  var WRITE_HINTS = [
-    'install', 'insert', 'add', 'set', 'save', 'write', 'update', 'create', 'new', 'put', 'store', 'apply', 'register', 'import'
-  ];
+  var RESULT = { env: {}, gm: {}, ns: {}, chromeXt: null, symbols: [], fooview: null, storage: {}, extra: [] };
 
-  // Window / Location 之类的全局对象噪声很大，直接排除
-  function isGlobalNoise(v) {
-    try {
-      if (!v) return false;
-      if (typeof Window !== 'undefined' && v instanceof Window) return true;
-      var cn = v.constructor && v.constructor.name ? v.constructor.name : '';
-      if (cn === 'Window' || cn === 'Location' || cn === 'History' || cn === 'Navigator') return true;
-    } catch (e) {}
-    return false;
-  }
+  /* 写入类关键词（高亮 + 重点提示） */
+  var WRITE_HINTS = ['install', 'insert', 'add', 'set', 'save', 'write', 'update', 'create', 'new', 'put', 'store', 'apply', 'register', 'import', 'delete', 'remove', 'edit', 'modify'];
+  var KEYWORDS = ['command', 'script', 'install', 'insert', 'dispatch', 'post', 'parse', 'db', 'database', 'local', 'chrome', 'xt', 'gm', 'user', 'menu', 'storage', 'value', 'save', 'add', 'remove', 'delete', 'update'];
 
-  function safeName(v) {
+  function t(v) {
     try {
       if (v === null) return 'null';
-      var t = typeof v;
-      if (t === 'string' || t === 'number' || t === 'boolean') return t + ':' + String(v).slice(0, 60);
-      if (t === 'function') return 'function';
-      if (t === 'symbol') return 'symbol ' + String(v);
-      if (t === 'object') {
-        var ctor = v.constructor && v.constructor.name ? v.constructor.name : 'Object';
+      var ty = typeof v;
+      if (ty === 'string') return 'string:' + v.slice(0, 50);
+      if (ty === 'number' || ty === 'boolean') return ty + ':' + v;
+      if (ty === 'function') return 'function';
+      if (ty === 'symbol') return 'symbol ' + String(v);
+      if (ty === 'object') {
         if (Array.isArray(v)) return 'array(' + v.length + ')';
-        return 'object:' + ctor;
+        var c = v.constructor && v.constructor.name ? v.constructor.name : 'Object';
+        return 'object:' + c;
       }
-      return t;
-    } catch (e) { return 'unknown'; }
+      return ty;
+    } catch (e) { return '?'; }
   }
 
-  // 列出一个对象的所有键（字符串 + Symbol），不做深递归，避免死循环
-  function listKeys(obj, depth) {
+  function keysOf(obj) {
     var out = [];
-    if (!obj || depth > 2) return out;
+    if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return out;
     try {
-      var names = Object.getOwnPropertyNames(obj);
-      for (var i = 0; i < names.length; i++) {
-        var n = names[i];
-        var val;
-        try { val = obj[n]; } catch (e) { val = undefined; }
-        out.push({ k: n, v: safeName(val), isFn: typeof val === 'function' });
-      }
+      Object.getOwnPropertyNames(obj).forEach(function (n) {
+        var v; try { v = obj[n]; } catch (e) { v = undefined; }
+        out.push({ k: n, v: t(v), fn: typeof v === 'function' });
+      });
     } catch (e) {}
     try {
-      var syms = Object.getOwnPropertySymbols(obj);
-      for (var j = 0; j < syms.length; j++) {
-        var s = syms[j];
-        var sv;
-        try { sv = obj[s]; } catch (e) { sv = undefined; }
-        out.push({ k: 'Symbol(' + String(s).replace(/^Symbol\(|\)$/g, '') + ')', v: safeName(sv), isFn: typeof sv === 'function' });
-      }
+      Object.getOwnPropertySymbols(obj).forEach(function (s) {
+        var v; try { v = obj[s]; } catch (e) { v = undefined; }
+        out.push({ k: 'Symbol(' + String(s).replace(/^Symbol\(|\)$/g, '') + ')', v: t(v), fn: typeof v === 'function' });
+      });
     } catch (e) {}
     return out;
   }
 
-  // 判断这个对象是否值得关注
-  function scoreOf(keysText, keyName) {
-    var s = 0;
-    var low = (keyName + ' ' + keysText).toLowerCase();
-    for (var i = 0; i < KEYWORDS.length; i++) {
-      if (low.indexOf(KEYWORDS[i]) >= 0) s++;
-    }
-    for (var j = 0; j < WRITE_HINTS.length; j++) {
-      if (low.indexOf(WRITE_HINTS[j]) >= 0) s += 3;
-    }
+  /* ---------- 1. 环境信息 ---------- */
+  function probeEnv() {
+    var e = {};
+    try { e.href = location.href; } catch (err) { e.href = '?'; }
+    try { e.hostname = location.hostname; } catch (err) { e.hostname = '?'; }
+    try { e.protocol = location.protocol; } catch (err) { e.protocol = '?'; }
+    try { e.origin = location.origin; } catch (err) { e.origin = '?'; }
+    e.isErrorPage = (String(e.protocol).toLowerCase() === 'chrome-error:' || /chromewebdata|neterror/i.test(e.href));
+    // 文本兜底：错误页正文会写 ERR_XXX
+    try {
+      if (!e.isErrorPage) {
+        var tx = (document.documentElement && document.documentElement.innerText) || (document.body && document.body.innerText) || (document.body && document.body.textContent) || '';
+        if (/ERR_[A-Z_]+/.test(tx)) { e.isErrorPage = true; e.errorText = String(tx).trim().slice(0, 120); }
+      }
+    } catch (err) {}
+    e.readyState = document.readyState;
+    e.ua = navigator.userAgent;
+    e.time = new Date().toLocaleString();
+    return e;
+  }
+
+  /* ---------- 2. GM API 家族 ---------- */
+  var GM_LIST = [
+    'GM_setValue', 'GM_getValue', 'GM_deleteValue', 'GM_listValues', 'GM_getValues', 'GM_setValues',
+    'GM_xmlhttpRequest', 'GM_download', 'GM_registerMenuCommand', 'GM_unregisterMenuCommand',
+    'GM_addStyle', 'GM_addElement', 'GM_openInTab', 'GM_closeTab', 'GM_notification',
+    'GM_setClipboard', 'GM_getResourceText', 'GM_getResourceURL', 'GM_cookie', 'GM_webRequest',
+    'GM_info', 'GM_log', 'GM_getTab', 'GM_saveTab', 'GM_getTabs'
+  ];
+  function probeGM() {
+    var g = {};
+    GM_LIST.forEach(function (name) {
+      var ok = false, ty = 'undefined';
+      try {
+        var v = window[name];
+        if (typeof v === 'function') { ok = true; ty = 'function'; }
+        else if (v !== undefined) { ok = true; ty = t(v); }
+      } catch (e) { ty = 'error'; }
+      g[name] = { available: ok, type: ty };
+    });
+    // 直接作用域里的（用户脚本作用域，window 上可能没有）
+    ['GM_setValue', 'GM_getValue', 'GM_xmlhttpRequest'].forEach(function (name) {
+      try {
+        // eslint-disable-next-line no-eval
+        var v = eval('typeof ' + name);
+        if (g[name]) g[name].scope = v;
+      } catch (e) {}
+    });
+    return g;
+  }
+
+  /* ---------- 3. GM.* 命名空间 ---------- */
+  function probeNamespace() {
+    var ns = { exists: false, keys: [] };
+    try {
+      if (typeof GM === 'undefined') return ns;
+      ns.exists = true;
+      ns.type = t(GM);
+      ns.keys = keysOf(GM);
+    } catch (e) { ns.error = String(e); }
+    return ns;
+  }
+
+  /* ---------- 4. ChromeXt 对象本体 ---------- */
+  function probeChromeXt() {
+    var found = [];
+    // 4.1 直接作用域（grant GM.ChromeXt 解锁后）
+    try {
+      if (typeof ChromeXt !== 'undefined' && ChromeXt) {
+        found.push({ src: 'ChromeXt (脚本作用域)', type: t(ChromeXt), keys: keysOf(ChromeXt) });
+      }
+    } catch (e) {}
+    // 4.2 window.ChromeXt
+    try {
+      if (window.ChromeXt) {
+        var dup = found.length && found[0].src.indexOf('脚本作用域') >= 0;
+        if (!dup) found.push({ src: 'window.ChromeXt', type: t(window.ChromeXt), keys: keysOf(window.ChromeXt) });
+      }
+    } catch (e) {}
+    // 4.3 window 上的 Symbol 属性（找带 commands / dispatch 的）
+    try {
+      Object.getOwnPropertySymbols(window).forEach(function (s) {
+        var v; try { v = window[s]; } catch (e) { return; }
+        if (!v || (typeof v !== 'object' && typeof v !== 'function')) return;
+        var sName = String(s);
+        // 浏览器内置的构造函数注册表，纯噪音，跳过
+        if (/webidl2js|constructor registry/i.test(sName)) return;
+        var ks = keysOf(v);
+        var txt = ks.map(function (x) { return x.k; }).join(' ').toLowerCase();
+        var hit = /command|dispatch|script|xt|chrome/.test(txt);
+        if (hit) {
+          found.push({ src: 'window[Symbol(' + String(s).replace(/^Symbol\(|\)$/g, '') + ')]', type: t(v), keys: ks });
+        }
+      });
+    } catch (e) {}
+    return found;
+  }
+
+  /* ---------- 5. FV 的 globalfooviewobject 深挖 ---------- */
+  function probeFooView() {
+    var out = null;
+    try {
+      var fv = window.globalfooviewobject;
+      if (!fv) return null;
+      out = { type: t(fv), methods: [] };
+      keysOf(fv).forEach(function (k) {
+        out.methods.push({ name: k.k, type: k.v, fn: k.fn });
+      });
+      // 顺带找其他 fooview 相关
+      out.others = [];
+      try {
+        Object.getOwnPropertyNames(window).forEach(function (n) {
+          if (/fooview/i.test(n)) out.others.push({ name: n, type: t(window[n]) });
+        });
+      } catch (e) {}
+    } catch (e) { out = { error: String(e) }; }
+    return out;
+  }
+
+  /* ---------- 6. 存储能力实测 ---------- */
+  function probeStorage() {
+    var s = {};
+    var TEST_KEY = '__cx_probe_test__';
+    var TEST_VAL = 'ok_' + Date.now();
+    // GM
+    s.gm = { write: false, read: false, match: false, err: '' };
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(TEST_KEY, TEST_VAL);
+        s.gm.write = true;
+        var back = GM_getValue(TEST_KEY, null);
+        s.gm.read = back !== null;
+        s.gm.match = back === TEST_VAL;
+        try { GM_deleteValue(TEST_KEY); } catch (e) {}
+      } else { s.gm.err = 'GM_setValue 未定义'; }
+    } catch (e) { s.gm.err = String(e); }
+    // localStorage
+    s.ls = { write: false, read: false, match: false, err: '' };
+    try {
+      localStorage.setItem(TEST_KEY, TEST_VAL);
+      s.ls.write = true;
+      var b2 = localStorage.getItem(TEST_KEY);
+      s.ls.read = b2 !== null;
+      s.ls.match = b2 === TEST_VAL;
+      try { localStorage.removeItem(TEST_KEY); } catch (e) {}
+    } catch (e) { s.ls.err = String(e).slice(0, 80); }
     return s;
   }
 
+  /* ---------- 汇总 ---------- */
   function collect() {
-    var items = [];
-
-    // 1) window 自有字符串属性
-    try {
-      var own = Object.getOwnPropertyNames(window);
-      for (var i = 0; i < own.length; i++) {
-        var n = own[i];
-        if (n === 'window' || n === 'self' || n === 'top' || n === 'parent' || n === 'document' || n === 'location') continue;
-        var v;
-        try { v = window[n]; } catch (e) { continue; }
-        if (v === null || (typeof v !== 'object' && typeof v !== 'function')) continue;
-        if (isGlobalNoise(v)) continue;
-        var keys = listKeys(v, 0);
-        var txt = keys.map(function (x) { return x.k; }).join(' ');
-        var sc = scoreOf(txt, n);
-        if (sc > 0 || /chrome|xt|gm|script|symbol/i.test(n)) {
-          items.push({ src: 'window.' + n, name: n, type: safeName(v), score: sc, keys: keys });
-        }
-      }
-    } catch (e) {}
-
-    // 2) window 上的 Symbol 属性（菜单提取器就是这么找到 commands 的）
-    try {
-      var syms = Object.getOwnPropertySymbols(window);
-      for (var j = 0; j < syms.length; j++) {
-        var s = syms[j];
-        var sv;
-        try { sv = window[s]; } catch (e) { continue; }
-        if (sv === null || (typeof sv !== 'object' && typeof sv !== 'function')) continue;
-        if (isGlobalNoise(sv)) continue;
-        var keys2 = listKeys(sv, 1);
-        var txt2 = keys2.map(function (x) { return x.k; }).join(' ');
-        var sc2 = scoreOf(txt2, String(s)) + 5; // Symbol 属性默认加分
-        items.push({
-          src: 'window[Symbol(' + String(s).replace(/^Symbol\(|\)$/g, '') + ')]',
-          name: String(s), type: safeName(sv), score: sc2, keys: keys2
-        });
-      }
-    } catch (e) {}
-
-    // 3) 嵌套一层：对象里的对象（找 commands / dispatch 之类）
-    try {
-      var roots = [];
-      try { roots = Object.getOwnPropertyNames(window); } catch (e) {}
-      for (var r = 0; r < roots.length; r++) {
-        var rn = roots[r];
-        if (rn === 'window' || rn === 'self' || rn === 'top' || rn === 'parent' || rn === 'document' || rn === 'location') continue;
-        var rv;
-        try { rv = window[rn]; } catch (e) { continue; }
-        if (rv === null || (typeof rv !== 'object' && typeof rv !== 'function')) continue;
-        if (isGlobalNoise(rv)) continue;
-        var k1 = listKeys(rv, 0);
-        for (var k = 0; k < k1.length; k++) {
-          var subName = k1[k].k;
-          var sub;
-          try { sub = rv[subName]; } catch (e) { continue; }
-          if (sub === null || (typeof sub !== 'object' && typeof sub !== 'function')) continue;
-          if (Array.isArray(sub)) continue;
-          var ks = listKeys(sub, 0);
-          var ts = ks.map(function (x) { return x.k; }).join(' ');
-          var ss = scoreOf(ts, subName);
-          if (ss >= 4) {
-            items.push({ src: 'window.' + rn + '.' + subName, name: subName, type: safeName(sub), score: ss, keys: ks });
-          }
-        }
-      }
-    } catch (e) {}
-
-    // 去重 + 排序
-    var seen = {};
-    var uniq = [];
-    items.forEach(function (it) {
-      if (seen[it.src]) return;
-      seen[it.src] = 1;
-      uniq.push(it);
-    });
-    uniq.sort(function (a, b) { return b.score - a.score; });
-    return uniq.slice(0, 120);
+    RESULT.env = probeEnv();
+    RESULT.gm = probeGM();
+    RESULT.ns = probeNamespace();
+    RESULT.chromeXt = probeChromeXt();
+    RESULT.fooview = probeFooView();
+    RESULT.storage = probeStorage();
+    return RESULT;
   }
 
-  // 全局直接访问，方便在 Eruda 控制台里查看
-  window.__cxProbe = function () { return collect(); };
+  window.__cxProbe2 = collect;
 
-  /* ---------------- UI ---------------- */
-  function buildUI(data) {
+  /* ================= UI ================= */
+  function hl(text) {
+    var out = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    WRITE_HINTS.forEach(function (w) {
+      try {
+        out = out.replace(new RegExp('(' + w + ')', 'gi'), '<span class="cxp-hit">$1</span>');
+      } catch (e) {}
+    });
+    return out;
+  }
+  function line(s) { return String(s); }
+
+  function buildText() {
+    var L = [];
+    L.push('======== ChromeXt 接口探测 v2 ========');
+    L.push('时间: ' + RESULT.env.time);
+    L.push('');
+    L.push('【1. 环境】');
+    L.push('  地址: ' + RESULT.env.href);
+    L.push('  hostname: ' + RESULT.env.hostname);
+    L.push('  protocol: ' + RESULT.env.protocol);
+    L.push('  origin: ' + RESULT.env.origin);
+    L.push('  是否错误页: ' + RESULT.env.isErrorPage);
+    L.push('  UA: ' + RESULT.env.ua);
+    L.push('');
+    L.push('【2. GM API 家族】');
+    Object.keys(RESULT.gm).forEach(function (k) {
+      var it = RESULT.gm[k];
+      if (it.available) L.push('  ✅ ' + k + '  [' + it.type + ']' + (it.scope ? ' scope=' + it.scope : ''));
+    });
+    var miss = Object.keys(RESULT.gm).filter(function (k) { return !RESULT.gm[k].available; });
+    if (miss.length) L.push('  ❌ 不可用: ' + miss.join(', '));
+    L.push('');
+    L.push('【3. GM.* 命名空间】');
+    L.push('  存在: ' + RESULT.ns.exists + '  类型: ' + (RESULT.ns.type || '-'));
+    if (RESULT.ns.keys && RESULT.ns.keys.length) {
+      L.push('  成员:');
+      RESULT.ns.keys.forEach(function (k) { L.push('    ' + (k.fn ? 'ƒ ' : '  ') + k.k + ' = ' + k.v); });
+    }
+    L.push('');
+    L.push('【4. ChromeXt 对象】');
+    if (!RESULT.chromeXt.length) L.push('  ⚠️ 未找到（可能 grant 未解锁，或本页未注入）');
+    RESULT.chromeXt.forEach(function (c) {
+      L.push('  --- ' + c.src + '  [' + c.type + ']');
+      c.keys.forEach(function (k) { L.push('    ' + (k.fn ? 'ƒ ' : '  ') + k.k + ' = ' + k.v); });
+    });
+    L.push('');
+    L.push('【5. FV globalfooviewobject】');
+    if (!RESULT.fooview) L.push('  ⚠️ 未找到（非 FV 浏览器）');
+    else if (RESULT.fooview.error) L.push('  错误: ' + RESULT.fooview.error);
+    else {
+      L.push('  类型: ' + RESULT.fooview.type);
+      L.push('  方法 (' + RESULT.fooview.methods.length + '):');
+      RESULT.fooview.methods.forEach(function (m) { L.push('    ' + (m.fn ? 'ƒ ' : '  ') + m.name + ' = ' + m.type); });
+      if (RESULT.fooview.others && RESULT.fooview.others.length) {
+        L.push('  其他 fooview 对象:');
+        RESULT.fooview.others.forEach(function (o) { L.push('    ' + o.name + ' = ' + o.type); });
+      }
+    }
+    L.push('');
+    L.push('【6. 存储能力实测】');
+    L.push('  GM_setValue: 写=' + RESULT.storage.gm.write + ' 读=' + RESULT.storage.gm.read + ' 一致=' + RESULT.storage.gm.match + (RESULT.storage.gm.err ? ' 错误=' + RESULT.storage.gm.err : ''));
+    L.push('  localStorage: 写=' + RESULT.storage.ls.write + ' 读=' + RESULT.storage.ls.read + ' 一致=' + RESULT.storage.ls.match + (RESULT.storage.ls.err ? ' 错误=' + RESULT.storage.ls.err : ''));
+    L.push('');
+    L.push('======== 结束 ========');
+    return L.join('\n');
+  }
+
+  function buildUI() {
     var st = document.createElement('style');
     st.textContent =
-      '#cxp-fab{position:fixed;right:0;top:38%;transform:translateY(-50%);z-index:2147483647;width:32px;height:52px;' +
+      '#cx2-fab{position:fixed;right:0;top:30%;transform:translateY(-50%);z-index:2147483647;width:34px;height:56px;' +
       'background:#5a4b8f;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;' +
-      'font:bold 12px system-ui;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:.92}' +
-      '#cxp-panel{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column;font:13px/1.6 system-ui}' +
-      '#cxp-head{padding:10px 12px;background:#f5f6fa;border-bottom:1px solid #e5e7eb;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:none}' +
-      '#cxp-head .t{font-weight:700;color:#5a4b8f}' +
-      '#cxp-head button{padding:6px 12px;border:0;border-radius:6px;background:#5a4b8f;color:#fff;font:600 12px system-ui;cursor:pointer}' +
-      '#cxp-head button.g{background:#eef2f5;color:#333;border:1px solid #ccd0d6}' +
-      '#cxp-list{flex:1;overflow:auto;padding:8px}' +
-      '.cxp-item{margin-bottom:8px;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden}' +
-      '.cxp-title{padding:8px 10px;background:#fafafa;font:600 12px Consolas,monospace;color:#333;cursor:pointer;word-break:break-all}' +
-      '.cxp-title .sc{float:right;background:#5a4b8f;color:#fff;border-radius:8px;padding:0 6px;font-size:11px}' +
-      '.cxp-body{display:none;padding:8px 10px;background:#fff;white-space:pre-wrap;word-break:break-all;font:11px/1.7 Consolas,monospace;color:#444;max-height:320px;overflow:auto}' +
-      '.cxp-body.open{display:block}' +
+      'font:bold 12px system-ui;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3);opacity:.93}' +
+      '#cx2-panel{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column;font:13px/1.6 system-ui}' +
+      '#cx2-head{padding:10px 12px;background:#f5f6fa;border-bottom:1px solid #e5e7eb;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:none}' +
+      '#cx2-head .t{font-weight:700;color:#5a4b8f}' +
+      '#cx2-head button{padding:6px 12px;border:0;border-radius:6px;background:#5a4b8f;color:#fff;font:600 12px system-ui;cursor:pointer}' +
+      '#cx2-head button.g{background:#eef2f5;color:#333;border:1px solid #ccd0d6}' +
+      '#cx2-body{flex:1;overflow:auto;padding:10px;white-space:pre-wrap;word-break:break-all;font:11px/1.7 Consolas,monospace;color:#333}' +
       '.cxp-hit{color:#c0392b;font-weight:700}';
     document.head.appendChild(st);
 
     var fab = document.createElement('div');
-    fab.id = 'cxp-fab';
-    fab.textContent = 'CX?';
-    fab.title = 'ChromeXt 接口探测';
+    fab.id = 'cx2-fab'; fab.textContent = 'CX2'; fab.title = 'ChromeXt 接口探测 v2';
 
     var panel = document.createElement('div');
-    panel.id = 'cxp-panel';
+    panel.id = 'cx2-panel';
     panel.innerHTML =
-      '<div id="cxp-head">' +
-        '<span class="t">🔍 ChromeXt 接口探测（只读）</span>' +
-        '<button id="cxp-copy">📋 复制全部</button>' +
-        '<button id="cxp-expand">📖 全部展开</button>' +
-        '<button class="g" id="cxp-close">✕ 关闭</button>' +
+      '<div id="cx2-head">' +
+        '<span class="t">🔍 ChromeXt 探测 v2（只读）</span>' +
+        '<button id="cx2-copy">📋 复制全部</button>' +
+        '<button id="cx2-again">🔄 重新探测</button>' +
+        '<button class="g" id="cx2-close">✕ 关闭</button>' +
       '</div>' +
-      '<div id="cxp-list"></div>';
+      '<div id="cx2-body"></div>';
 
     document.body.appendChild(fab);
     document.body.appendChild(panel);
 
-    var list = panel.querySelector('#cxp-list');
-
-    function hl(text) {
-      var out = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      WRITE_HINTS.forEach(function (w) {
-        var re = new RegExp('(' + w + ')', 'gi');
-        out = out.replace(re, '<span class="cxp-hit">$1</span>');
-      });
-      return out;
-    }
-
-    data.forEach(function (it) {
-      var box = document.createElement('div');
-      box.className = 'cxp-item';
-      var head = document.createElement('div');
-      head.className = 'cxp-title';
-      head.innerHTML = '<span class="sc">' + it.score + '</span>' + hl(it.src) + '  →  ' + hl(it.type);
-      var body = document.createElement('div');
-      body.className = 'cxp-body';
-      var lines = it.keys.map(function (x) {
-        return (x.isFn ? 'ƒ ' : '  ') + x.k + '  =  ' + x.v;
-      });
-      body.innerHTML = hl(lines.join('\n'));
-      if (!it.keys.length) body.textContent = '(无可枚举键)';
-      head.onclick = function () { body.classList.toggle('open'); };
-      box.appendChild(head);
-      box.appendChild(body);
-      list.appendChild(box);
-    });
-
-    if (!data.length) {
-      list.innerHTML = '<div style="padding:20px;color:#888;text-align:center">' +
-        '未发现可疑对象。可能 ChromeXt 未在此页面注入，或接口未挂在 window 上。</div>';
-    }
+    var body = panel.querySelector('#cx2-body');
+    function paint() { body.innerHTML = hl(buildText()); }
+    paint();
 
     fab.onclick = function () {
       panel.style.display = panel.style.display === 'flex' ? 'none' : 'flex';
     };
-    panel.querySelector('#cxp-close').onclick = function () { panel.style.display = 'none'; };
-    panel.querySelector('#cxp-expand').onclick = function () {
-      var all = list.querySelectorAll('.cxp-body');
-      for (var i = 0; i < all.length; i++) all[i].classList.add('open');
-    };
-    panel.querySelector('#cxp-copy').onclick = function () {
-      var text = data.map(function (it) {
-        return '=== ' + it.src + '  [' + it.type + ']  score=' + it.score + '\n' +
-          it.keys.map(function (x) { return (x.isFn ? 'ƒ ' : '  ') + x.k + ' = ' + x.v; }).join('\n');
-      }).join('\n\n');
+    panel.querySelector('#cx2-close').onclick = function () { panel.style.display = 'none'; };
+    panel.querySelector('#cx2-again').onclick = function () { collect(); paint(); alert('已重新探测'); };
+    panel.querySelector('#cx2-copy').onclick = function () {
+      var text = buildText();
       function fb() {
         try {
           var ta = document.createElement('textarea');
           ta.value = text; ta.style.position = 'fixed'; ta.style.top = '-1000px';
           document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
-          var ok = false;
-          try { ok = document.execCommand('copy'); } catch (e) {}
+          var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
           document.body.removeChild(ta);
-          alert(ok ? '已复制，可粘贴发给分析' : '复制失败，请长按选择文本手动复制');
+          alert(ok ? '已复制到剪贴板' : '复制失败，请长按选择文本手动复制');
         } catch (e) { alert('复制失败'); }
       }
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(function () { alert('已复制，可粘贴发给分析'); }, fb);
+          navigator.clipboard.writeText(text).then(function () { alert('已复制到剪贴板'); }, fb);
         } else fb();
       } catch (e) { fb(); }
     };
@@ -285,13 +370,13 @@
   function boot() {
     try {
       if (!document.body) { document.documentElement.appendChild(document.createElement('body')); }
-      var data = collect();
-      window.__cxProbeData = data;
-      buildUI(data);
-      console.log('[CX探测] 找到 ' + data.length + ' 个可疑对象，详细信息见 window.__cxProbeData 或点右侧 CX? 按钮');
-      console.log('[CX探测] 重点看 score 高的、以及带 install/insert/set/save/add 等写入类方法的条目');
+      collect();
+      buildUI();
+      console.log('[CX探测v2] 完成。完整报告见 window.__cxProbe2() 或点右侧 CX2 按钮。');
+      console.log('[CX探测v2] GM 可用数:', Object.keys(RESULT.gm).filter(function (k) { return RESULT.gm[k].available; }).length);
+      console.log('[CX探测v2] ChromeXt 对象:', RESULT.chromeXt.length ? RESULT.chromeXt.map(function (c) { return c.src; }).join(' | ') : '未找到');
     } catch (e) {
-      console.log('[CX探测] 失败', e);
+      console.log('[CX探测v2] 失败', e);
     }
   }
 
