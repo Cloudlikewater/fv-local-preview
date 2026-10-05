@@ -9,6 +9,8 @@
 // @grant        GM.ChromeXt
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_setClipboard
+// @grant        GM_notification
 // ==/UserScript==
 
 (function () {
@@ -437,11 +439,11 @@ var CSS =
     '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}' +
     '.jk{color:#0077aa}.js{color:#d14}.jn{color:#c18401}.jb{color:#8250df}' +
     '.ck{color:#c792ea}.cs{color:#0a7d34}.cc{color:#7a8290}.cn{color:#c18401}' +
-    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483645;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
+    '#fv-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#323232;color:#fff;padding:9px 18px;border-radius:20px;font-size:13px;z-index:2147483647;opacity:0;pointer-events:none;transition:opacity .25s;box-shadow:0 4px 12px rgba(0,0,0,.15);max-width:90%}' +
     '#fv-toast.on{opacity:1}' +
-    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483646;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
+    '#fv-fab{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:2147483645;width:32px;height:50px;background:#2f7d63;color:#fff;border-radius:18px 0 0 18px;display:flex;align-items:center;justify-content:center;font:bold 12px system-ui;cursor:pointer;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.2);border-right:none;transition:width .3s,opacity .3s;opacity:.92}' +
     '#fv-fab:active{width:45px;opacity:1}' +
-    '#fv-mask{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
+    '#fv-mask{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.4);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center}' +
     '#fv-mask.on{display:flex}' +
     '#fv-card{width:88%;max-width:420px;max-height:78vh;overflow:auto;background:rgba(255,255,255,.95);border:1px solid rgba(255,255,255,.6);border-radius:24px;padding:16px;box-shadow:0 8px 32px 0 rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;animation:pop .3s cubic-bezier(.34,1.56,.64,1)}' +
     '@keyframes pop{from{transform:scale(.85);opacity:0}to{transform:scale(1);opacity:1}}' +
@@ -450,16 +452,30 @@ var CSS =
     '.mi:hover{background:#2f7d63;color:#fff}' +
     '.mi:active{transform:scale(.97)}' +
     '.mi.close{background:#fdecec;color:#c0392b}' +
-    '#fv-inst{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+    '#fv-inst{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
     '#fv-inst .ih,#fv-overlay .oh{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
     '#fv-inst .tip{padding:8px 12px;color:#666;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
-    '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;white-space:pre-wrap;word-break:break-all;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text}' +
-    '#fv-overlay{position:fixed;inset:0;z-index:2147483647;background:#fff;display:none;flex-direction:column}' +
+    '#fv-inst-code{flex:1;overflow:auto;margin:10px;padding:12px;background:#fff;border:1px solid #e5e7eb;border-radius:10px;font:12px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text;resize:none;min-height:180px}' +
+    '#fv-overlay{position:fixed;inset:0;z-index:2147483644;background:#fff;display:none;flex-direction:column}' +
     '#fv-ov-tip{display:none;padding:8px 12px;background:#fff7e6;color:#8a6d3b;font-size:12px;border-bottom:1px solid #f0e0b0}' +
     '#fv-ov-frame{flex:1;width:100%;border:0;background:#fff}' +
     '#fv-ov-inline{flex:1;width:100%;overflow:auto;background:#fff;display:none}' +
-    '#fv-ov-inline pre{margin:0;padding:14px;white-space:pre-wrap;font:13px/1.6 Consolas,monospace;color:#333}' +
-    '#fv-dlg{position:fixed;inset:0;z-index:2147483647;background:#f5f6fa;display:none;flex-direction:column}' +
+          /* 必须限定为「直接子元素」：
+         若写成后代选择器 #fv-ov-inline pre，会命中 md 全屏里
+         .fvmd 内的代码块 <pre>，而它特异性(1,0,1) 高于 .fvmd pre(0,1,1)，
+         于是把代码文字色 #d6deeb(浅) 覆盖成 #333(深灰) ——
+         深色代码块配深灰字几乎看不见，就是「全屏后文字变灰」的原因。
+         md 的 pre 在 .fvmd 内层，是孙子元素，用 > 即可避开。 */
+      '#fv-ov-inline > pre{margin:0;padding:14px;white-space:pre-wrap;font:13px/1.6 Consolas,monospace;color:#333}' +
+    /* 自检风险确认层：必须比 fv-dlg 更高，否则会被安装面板盖住看不见 */
+    '#fv-cf{position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:16px}' +
+    '#fv-cf.on{display:flex}' +
+    '#fv-cf-box{width:100%;max-width:420px;max-height:82vh;overflow:auto;background:#fff;border-radius:18px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.3);display:flex;flex-direction:column;gap:10px}' +
+    '#fv-cf-t{font:700 15px system-ui;color:#b42318}' +
+    '#fv-cf-b{font:12px/1.75 ui-monospace,Consolas,monospace;color:#444;white-space:pre-wrap;word-break:break-all;max-height:54vh;overflow:auto;background:#fff5f5;border:1px solid #f3c2c2;border-radius:10px;padding:10px}' +
+    '#fv-cf-btns{display:flex;gap:8px}' +
+    '#fv-dlg-check{font:12px/1.75 system-ui;padding:8px 12px;white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #e5e7eb}' +
+    '#fv-dlg{position:fixed;inset:0;z-index:2147483646;background:#f5f6fa;display:none;flex-direction:column}' +
     '#fv-dlg .ih{background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;box-shadow:0 2px 6px rgba(0,0,0,.04);flex:none}' +
     '#fv-dlg-tip{padding:8px 12px;color:#8a6d3b;font-size:12px;background:#fffbe6;border-bottom:1px solid #f0e6c0;line-height:1.7}' +
     '@media(max-width:480px){.head{gap:4px}.pick{min-width:100px}.btn{padding:6px 9px}}';
@@ -467,10 +483,9 @@ var CSS =
 var BODY =
     '<div class="head">' +
       '<span class="title">📂 FV 本地预览</span>' +
-      '<span class="pick" id="fv-pick"><span id="fv-name">📁 选择文件</span>' +
+      '<span class="pick"><span id="fv-name">📁 选择文件</span>' +
         '<input type="file" id="fv-file" accept=".html,.htm,.xhtml,.xht,.xml,.xsl,.xslt,.svg,.json,.md,.markdown,.js,.mjs,.user.js,.css,.csv,.tsv,.txt,.log,.pdf,.mhtml,.mht,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.ogg,.m4a,.mp4,.webm">' +
       '</span>' +
-      '<button class="btn" id="fv-inst-btn">⚡ 安装脚本</button>' +
       '<button class="btn" id="fv-full">🖥️ 全屏打开</button>' +
       '<button class="btn sec" id="fv-reload">重载</button>' +
       '<button class="btn ghost" id="fv-home">首页</button>' +
@@ -484,21 +499,23 @@ var BODY =
     '<div id="fv-toast"></div>' +
     '<div id="fv-fab">FV</div>' +
     '<div id="fv-mask"><div id="fv-card"></div></div>' +
+    /* 本面板现在只用于诊断（安装已改走 fv-dlg 可编辑确认框）。
+       标题与按钮必须和用途一致，否则会被误当成「复制安装代码」。 */
     '<div id="fv-inst">' +
       '<div class="ih">' +
-        '<span class="title">📦 安装为 ChromeXt 脚本</span>' +
-        '<button class="btn sec" id="fv-mgr2">⚙️ 打开管理页</button>' +
-        '<button class="btn" id="fv-copy">📋 仅复制代码</button>' +
-        '<button class="btn sec" id="fv-srcpage">📄 源码页查看</button>' +
-        '<button class="btn sec" id="fv-gh">☁️ 一键传 GitHub</button>' +
-        '<button class="btn ghost" id="fv-gh-reset">🔄 换仓库</button>' +
+        '<span class="title">🔍 诊断信息</span>' +
+        '<button class="btn" id="fv-copy">📋 一键复制日志</button>' +
         '<button class="btn ghost" id="fv-inst-close">✕ 关闭</button>' +
       '</div>' +
       '<div class="tip" id="fv-inst-tip"></div>' +
-      '<div id="fv-inst-code"></div>' +
+      /* 用 textarea 而不是 div：错误页 origin=null（非安全上下文），
+         navigator.clipboard 不存在、execCommand 又不可靠（会复制页面选区）。
+         textarea 支持长按 → 全选/复制，是本环境下唯一可靠的路径。 */
+      '<textarea id="fv-inst-code" readonly spellcheck="false"></textarea>' +
     '</div>' +
     '<div id="fv-overlay">' +
-      '<div class="oh">' +
+      /* 顶栏默认隐藏：全屏要像正常网页一样占满，返回改放悬浮球菜单。 */
+      '<div class="oh" id="fv-ov-head" style="display:none">' +
         '<span class="title">🖥️ 全屏预览</span>' +
         '<button class="btn" id="fv-ov-dl" style="display:none">⬇️ 下载</button>' +
         '<button class="btn ghost" id="fv-ov-close">✕ 退出全屏</button>' +
@@ -515,6 +532,7 @@ var BODY =
         '<button class="btn ghost" id="fv-dlg-close">✕ 取消</button>' +
       '</div>' +
       '<div class="tip" id="fv-dlg-tip"></div>' +
+      '<div id="fv-dlg-check"></div>' +
       '<div style="flex:1;overflow:auto;display:flex;flex-direction:column">' +
         '<div id="fv-dlg-form" style="padding:12px"></div>' +
         '<div style="padding:0 12px 12px">' +
@@ -524,7 +542,10 @@ var BODY =
             'font:11px/1.6 Consolas,monospace;color:#333;-webkit-user-select:text;user-select:text"></div>' +
         '</div>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    '<div id="fv-cf"><div id="fv-cf-box">' +
+      '<div id="fv-cf-t"></div><div id="fv-cf-b"></div><div id="fv-cf-btns"></div>' +
+    '</div></div>';
 
   /* ============================================================
      工具页脚本（普通函数写法，最后 toString 注入，避免双重转义）
@@ -541,6 +562,7 @@ var BODY =
 
     var lastText = '', lastName = '', lastKind = '', lastFile = null, lastBlob = null, lastOvUrl = null;
     var ovLast = null;   // 最近一次全屏的信息，供诊断使用
+    var lastCheck = null;  // 最近一次安装前自检结果，供诊断显示
     var S1 = '<' + 'script>', S2 = '<' + '/script>';
 
     /* ---------- 基础 ---------- */
@@ -565,7 +587,22 @@ var BODY =
       mediaBox.style.display = 'none';
     }
     function showPre(html) { hideAll(); preBox.style.display = 'block'; preBox.innerHTML = html; }
-    function showMd(html) { hideAll(); mdBox.style.display = 'block'; mdBox.innerHTML = html; }
+    function showMd(html) {
+      hideAll();
+      mdBox.style.display = 'block';
+      mdBox.innerHTML = html;
+      /* 关键：#fv-md 全局 CSS 自带 padding:18px 22px，
+         而 mdRenderHtml() 里内层 .fvmd 也带 padding → 主界面变成 36/44px，
+         全屏容器无 padding 只有 18/22px → 两处观感不一样。
+         这里把外壳 padding 归零，样式统一由 .fvmd 负责，保证完全一致。 */
+      try { mdBox.style.padding = '0'; } catch (e) {}
+    }
+    /* Markdown 统一渲染：主界面与全屏共用同一份 HTML+CSS，
+       避免两处各写一套导致观感不一致（字体/间距/滚动不同）。 */
+    function mdRenderHtml(t) {
+      return '<style>' + MD_CSS + '</style>' +
+        '<div class="fvmd" style="' + MD_INLINE + '">' + mdToHtml(t) + '</div>';
+    }
     function showFrameSrc(t) { hideAll(); frame.style.display = 'block'; frame.removeAttribute('sandbox'); frame.srcdoc = t; }
     function showFrameBlob(url) { hideAll(); frame.style.display = 'block'; frame.removeAttribute('sandbox'); frame.src = url; }
 
@@ -657,35 +694,49 @@ var BODY =
     function ovShowInline(html) {
       try {
         ovFrame.style.display = 'none';
-        ovFrame.removeAttribute('srcdoc');
-        try { ovFrame.src = 'about:blank'; } catch (e) {}
+        /* 不要用 src='about:blank' 清空：异步导航会覆盖随后设置的 srcdoc（竞态白屏） */
+        try { ovFrame.srcdoc = ''; } catch (e) {}
+        try { ovFrame.removeAttribute('src'); } catch (e) {}
         var box = $('fv-ov-inline');
         if (!box) return false;
         box.innerHTML = html || '';
         box.style.display = 'block';
+        /* 容器本身也锁定字体：避免外层样式影响观感，保证与主界面一致 */
+        box.style.fontFamily = MD_FONT;
+        box.style.fontSize = '14px';
+        box.style.lineHeight = '1.6';
+        /* 与主界面 #fv-md 对齐：外壳不加 padding，交给内层容器 */
+        box.style.padding = '0';
         ovLast = ovLast || {};
         ovLast.way = 'inline(直接注入)';
         return true;
       } catch (e) { return false; }
     }
 
+    /* 判断 iframe 是否真的渲染出内容。
+       关键：区分「确认失败」和「无法确认」。
+       null origin（错误页）下即使 srcdoc 渲染成功，也常常读不到 contentDocument
+       （跨域限制）。旧版把这当成失败 → 换 blob → blob 在 null origin 必失败 →
+       最后降级成 inline 兜底（会剥离所有 script/style）→ 页面变白。
+       所以读不到时不能判失败，应视为「无法确认」，保持当前渲染不动。 */
     function ovLoadedOk(cb) {
-      /* 判断 iframe 是否真的渲染出内容 */
       var tries = 0, max = 12;
       (function check() {
         var of = $('fv-ov-frame');
-        if (!of) { cb(false); return; }
-        var len = -1, hasNode = false;
+        if (!of) { cb('fail'); return; }
+        var len = -1, hasNode = false, readable = false;
         try {
           var dd = of.contentDocument;
           if (dd) {
+            readable = true;
             if (dd.body) { len = dd.body.innerHTML.length; hasNode = dd.body.childNodes.length > 0; }
             else if (dd.documentElement) { len = dd.documentElement.innerHTML.length; }
           }
-        } catch (e) { len = -1; }
-        if (len > 0 || hasNode) { cb(true); return; }
+        } catch (e) { readable = false; }
+        if (len > 0 || hasNode) { cb('ok'); return; }           // 确认渲染成功
+        if (!readable) { cb('unknown'); return; }               // 读不到 → 无法确认，不降级
         if (++tries < max) { setTimeout(check, 120); }
-        else { cb(false); }
+        else { cb('fail'); }                                    // 能读但确实空 → 真失败
       })();
     }
 
@@ -714,8 +765,10 @@ var BODY =
           ovLast = ovLast || {}; ovLast.way = 'iframe blob'; ovLast.url = u;
         }
         ovLoadedOk(function (okk) {
-          if (okk) return;
-          /* 当前方式失败 → 换下一种；都失败则 inline 兜底 */
+          if (okk === 'ok') return;
+          /* 读不到内容（跨域限制）≠ 渲染失败，保持当前方式不动，避免误降级 */
+          if (okk === 'unknown') { ovLast = ovLast || {}; ovLast.way = ovLast.way + '（无法读取校验）'; return; }
+          /* 确认失败 → 换下一种；都失败则 inline 兜底 */
           if (way === 'srcdoc' && !ovRetryUsed.blob) { next('blob'); return; }
           if (way === 'blob' && !ovRetryUsed.srcdoc) { next('srcdoc'); return; }
           /* 都试过了还不行 → inline（剥离 script/style 避免污染） */
@@ -744,6 +797,31 @@ var BODY =
 
     /* mime 必须是合法 MIME；noViewport=true 时跳过 viewport 注入
        （SVG 是 XML 文档，插入 HTML 的 <meta> 会破坏结构） */
+    /* 媒体 / PDF 全屏：把预览区已渲染好的 HTML 直接搬进全屏层。
+       之前调用过 openFullMedia 但从未定义 → 媒体/PDF 点全屏直接抛 ReferenceError。 */
+    /* 顶栏显隐：全屏时隐藏，让内容真正占满屏幕；
+       仅当需要显示提示条或下载按钮时才露出，退出时恢复。 */
+    function ovHeadShow(show) {
+      try {
+        var h = $('fv-ov-head');
+        if (h) h.style.display = show ? 'flex' : 'none';
+      } catch (e) {}
+    }
+
+    function openFullMedia(html, tip, dlName) {
+      hideAll();
+      overlay.style.display = 'flex';
+      ovTip.style.display = tip ? 'block' : 'none';
+      ovTip.textContent = tip || '';
+      ovDl.style.display = dlName ? 'inline-block' : 'none';
+      if (dlName) ovDl.setAttribute('data-name', dlName);
+      ovHeadShow(!!tip || !!dlName);
+      ovLast = { mime: '(媒体)', len: (html || '').length, url: '', srcDoc: false, way: '', origin: '' };
+      try { ovLast.origin = String(location.origin || '(opaque)'); } catch (e) {}
+      return ovShowInline('<div style="padding:12px;display:flex;align-items:center;justify-content:center;' +
+        'min-height:100%;font-family:' + MD_FONT + '">' + html + '</div>');
+    }
+
     function openFull(text, blobUrl, tip, dlName, mime, noViewport, inlineHtml) {
       hideAll();
       overlay.style.display = 'flex';
@@ -751,6 +829,7 @@ var BODY =
       ovTip.textContent = tip || '';
       ovDl.style.display = dlName ? 'inline-block' : 'none';
       if (dlName) ovDl.setAttribute('data-name', dlName);
+      ovHeadShow(!!tip || !!dlName);
       ovLast = {
         mime: mime || 'text/html',
         len: (text || '').length,
@@ -778,8 +857,14 @@ var BODY =
 
     function closeFull() {
       overlay.style.display = 'none';
-      try { ovFrame.removeAttribute('srcdoc'); } catch (e) {}
-      try { ovFrame.src = 'about:blank'; } catch (e) {}
+      try { ovHeadShow(false); ovTip.style.display = 'none'; ovTip.textContent = ''; ovDl.style.display = 'none'; } catch (e) {}
+      /* 清空 iframe 不要用 src='about:blank'：它会触发一次异步导航，
+         若紧接着再设 srcdoc，导航可能覆盖新内容（竞态）→ 连续打开全屏时白屏。
+         改成先清空 srcdoc、再延时置空 src，两者都不会抢占后续渲染。 */
+      try { ovFrame.srcdoc = ''; } catch (e) {}
+      setTimeout(function () {
+        try { if (!ovFrame.getAttribute('srcdoc')) ovFrame.src = ''; } catch (e) {}
+      }, 0);
       try { var bi = $('fv-ov-inline'); if (bi) { bi.innerHTML = ''; bi.style.display = 'none'; } } catch (e) {}
       try { if (lastOvUrl) { URL.revokeObjectURL(lastOvUrl); lastOvUrl = null; } } catch (e) {}
       // 若地址被改成 .user.js 结尾，退出时还原，避免残留
@@ -793,18 +878,29 @@ var BODY =
       } catch (e) {}
     }
     /* Markdown 样式（与外层 CSS 中 #fv-md 的规则一致），供全屏文档内联使用 */
-    var MD_CSS = 'html,body{margin:0}body{background:#fff}' +
-      '#fv-md{padding:18px 22px;background:#fff;font:14px/1.6 system-ui;color:#333}' +
-      '#fv-md h1,#fv-md h2,#fv-md h3,#fv-md h4{color:#1f2d3d;margin:16px 0 8px}' +
-      '#fv-md h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
-      '#fv-md p{margin:8px 0}' +
-      '#fv-md a{color:#2f7d63}' +
-      '#fv-md code{background:#f0f2f5;padding:1px 5px;border-radius:4px;color:#c0341d;font-family:Consolas,monospace}' +
-      '#fv-md pre{background:#0f1115;color:#d6deeb;padding:12px;border-radius:8px;overflow:auto}' +
-      '#fv-md pre code{background:transparent;color:inherit}' +
-      '#fv-md blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
-      '#fv-md img{max-width:100%;border-radius:6px}' +
-      '#fv-md hr{border:0;border-top:1px solid #eee;margin:16px 0}';
+    /* 字体栈必须与全局 body 完全一致。
+       注意：光写在 <style> 里可能被其他规则带跑，或在某些 WebView 上
+       注入的 <style> 不生效 → 所以要同时用「内联 style」硬写在元素上，
+       内联优先级最高，任何选择器都覆盖不了。 */
+    var MD_FONT = "-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif";
+    var MD_INLINE = 'font-family:' + MD_FONT + ';font-size:14px;line-height:1.6;color:#333;background:#fff;padding:18px 22px';
+    /* 不再写 html,body{margin:0}body{background:#fff}：
+       这条是全局规则，全屏注入后会把整个文档 body 背景改成白色，
+       退出全屏也无法还原。inline 容器本身已有 background:#fff，无需它。 */
+    var MD_CSS = '' +
+      /* 字体栈必须与全局 body 完全一致（原来是 system-ui，中文解析结果不同，
+         导致主界面与全屏观感不一样）。padding/背景也对齐主界面 #fv-md。 */
+      '.fvmd{width:100%;box-sizing:border-box}' +
+      '.fvmd h1,.fvmd h2,.fvmd h3,.fvmd h4{color:#1f2d3d;margin:16px 0 8px}' +
+      '.fvmd h1{border-bottom:1px solid #eee;padding-bottom:6px}' +
+      '.fvmd p{margin:8px 0}' +
+      '.fvmd a{color:#2f7d63}' +
+      '.fvmd code{background:#f0f2f5;padding:1px 5px;border-radius:4px;color:#c0341d;font-family:Consolas,monospace}' +
+      '.fvmd pre{background:#0f1115;color:#d6deeb;padding:12px;border-radius:8px;overflow:auto}' +
+      '.fvmd pre code{background:transparent;color:inherit}' +
+      '.fvmd blockquote{margin:8px 0;padding:6px 12px;border-left:4px solid #2f7d63;background:#f0f7f4;color:#555}' +
+      '.fvmd img{max-width:100%;border-radius:6px}' +
+      '.fvmd hr{border:0;border-top:1px solid #eee;margin:16px 0}';
 
     /* ---------- 各类渲染 ---------- */
     function renderHtml(t) { lastKind = 'html'; showFrameSrc(t); msg('已打开：' + lastName + '（相对路径资源可能加载失败）'); }
@@ -872,7 +968,7 @@ var BODY =
       }
       return out.join('\n');
     }
-    function renderMd(t) { lastKind = 'md'; showMd(mdToHtml(t)); msg('已渲染：' + lastName); }
+    function renderMd(t) { lastKind = 'md'; showMd(mdRenderHtml(t)); msg('已渲染：' + lastName); }
 
     function codeHtml(t) {
       var s = esc(t);
@@ -1048,7 +1144,9 @@ var BODY =
          直接把预览区已渲染好的内容搬进全屏层。 */
       if (lastKind === 'image' || lastKind === 'audio' || lastKind === 'video') {
         if (!mediaBox.innerHTML) { msg('当前环境无法全屏预览此媒体'); return; }
-        openFullMedia(mediaBox.innerHTML, '', lastName);
+        /* 不传 dlName：图片/音视频直接可见，不需要下载按钮，
+           顶栏保持隐藏，做到真正的全屏。 */
+        openFullMedia(mediaBox.innerHTML, '');
         return;
       }
       if (lastKind === 'pdf') {
@@ -1060,7 +1158,9 @@ var BODY =
          改用 inline 模式（不经过 iframe/blob），彻底绕开 opaque origin 限制。 */
       if (lastKind === 'md') {
         openFull(lastText, null, '', null, null, false,
-          '<style>' + MD_CSS + '</style><div id="fv-md">' + mdToHtml(lastText) + '</div>');
+          /* 与主界面完全共用 mdRenderHtml()，保证渲染一模一样。
+             （不能用 id="fv-md"：会撞上全局 #fv-md{display:none} 导致白屏） */
+          mdRenderHtml(lastText));
         return;
       }
       if (lastKind === 'csv') {
@@ -1124,7 +1224,7 @@ var BODY =
           '},120);' +
           S2 +
           '</body></html>');
-        msg('已全屏运行 JS（顶部有执行状态提示）');
+        msg('已全屏运行 JS（页内有状态提示条，退出点悬浮球）');
         return;
       }
       /* 其余（txt / 未知扩展名）：按代码高亮转义后全屏。
@@ -1136,26 +1236,67 @@ var BODY =
 
     /* ---------- 安装为 ChromeXt 脚本 ---------- */
     var installCode = '', installName = '';
+    /* 复制策略（重要）：
+       本页是错误页（origin=null，非安全上下文），navigator.clipboard 通常不存在；
+       而 document.execCommand('copy') 复制的是「页面选区」而非目标文本，
+       且常常仍返回 true → 曾导致「一点复制就复制出脚本源码」。
+       正解：借 ChromeXt 的 dispatch 调 Android 原生剪贴板，不受 origin 限制。 */
+    /* ChromeXt 的 copy action（Listener.kt）要求 payload 是 JSON 字符串：
+         { "type": "text"|"html", "text": "...", "label": "..." }
+       原生侧做 JSONObject(payload) 解析。
+       若直接传纯文本字符串 → 原生解析抛异常 → 但异常在 Kotlin 层，
+       JS 的 dispatch 不报错、正常返回 → 就会「提示已复制却什么都没复制」。
+       这就是之前失败的根因，务必用 JSON.stringify。 */
+    function cxCopy(text) {
+      try {
+        var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
+        if (CX && typeof CX.dispatch === 'function') {
+          var payload = JSON.stringify({ type: 'text', text: String(text), label: 'FV日志' });
+          CX.dispatch('copy', payload);
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
     function copyText(t, cb) {
-      function fb() {
-        try {
-          var ta = document.createElement('textarea');
-          ta.value = t; ta.style.position = 'fixed'; ta.style.top = '-1000px';
-          document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
-          var ok = false;
-          try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-          document.body.removeChild(ta);
-          cb(ok);
-        } catch (e) { cb(false); }
-      }
+      var done = false;
+      function finish(ok, way) { if (done) return; done = true; cb(!!ok, way || ''); }
+      // ① ChromeXt 原生剪贴板（本环境最可靠）
+      if (cxCopy(t)) { finish(true, 'ChromeXt 原生剪贴板'); return; }
+      // ② GM.setClipboard
+      try {
+        if (typeof GM_setClipboard === 'function') {
+          GM_setClipboard(t); finish(true, 'GM.setClipboard'); return;
+        }
+        if (typeof GM !== 'undefined' && GM && typeof GM.setClipboard === 'function') {
+          GM.setClipboard(t); finish(true, 'GM.setClipboard'); return;
+        }
+      } catch (e) {}
+      // ③ clipboard API（需安全上下文，错误页通常没有）
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(t).then(function () { cb(true); }, fb);
-        } else fb();
-      } catch (e) { fb(); }
+          navigator.clipboard.writeText(t).then(
+            function () { finish(true, 'clipboard API'); },
+            function () { finish(false); });
+          return;
+        }
+      } catch (e) {}
+      finish(false);
     }
+
+    /* 选中日志文本，便于手动长按 → 复制（错误页下最可靠的路径） */
+    function selectLogText() {
+      try {
+        var ta = $('fv-inst-code');
+        if (!ta) return false;
+        ta.focus();
+        ta.select();
+        try { ta.setSelectionRange(0, ta.value.length); } catch (e) {}
+        return true;
+      } catch (e) { return false; }
+    }
+
     /* 旧的「安装面板」改为：走可编辑的确认对话框（真安装） */
-    function openInstall() { openInstallDialog(); }
 
     /* ============================================================
        ★ 真正的安装：ChromeXt 的 Listener.kt 实现了 "installScript" action，
@@ -1165,23 +1306,104 @@ var BODY =
     ============================================================ */
 
     /* ---------- 元数据解析：把已有 UserScript 头读成字段 ---------- */
+    /* 定位 UserScript 元数据块。
+       旧实现的正则要求头必须紧贴文件开头（只允许前面有空白），
+       于是「顶部带说明注释的脚本」会被判成无头 →
+       ① 元数据全部丢失、回退成文件名；② 原头被当成代码体保留，
+       装出来的脚本元数据无效。这是导入功能的真实 bug。
+       现在改为：在文件前部查找第一个头块，并兼容斜杠星号形式的写法。 */
+    /* 判定：一段文本是否只含空白与注释（不含实质代码）。
+       用于确认「头块之前没有代码」。 */
+    function onlyComments(t) {
+      var x = String(t || '');
+      try {
+        x = x.replace(/\/\*[\s\S]*?\*\//g, ' ');          /* 块注释 */
+        x = x.replace(/(^|\n)[ \t]*\/\/[^\n\r]*/g, '$1'); /* 行首行注释 */
+      } catch (e) {}
+      return x.replace(/\s+/g, '') === '';
+    }
+
+    function metaBlock(code) {
+      var src = String(code || '');
+      /* ★ 不能只用「前若干字符」去找头块：
+         实测「自动无缝翻页」头块 8116 字符（含 base64 @icon）、
+         「自动展开全文」8190 字符（近 200 条 @match），
+         一旦截断窗口就匹配不到 ==/UserScript==，整份元数据被判为无头，
+         211 条指令全部丢失、脚本被装成默认通配 —— 最严重的一个 bug。
+         头块只会紧跟在文件开头，正则非贪婪遇到第一个结束标记即停，无性能问题。 */
+      var re = /(\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==|\/\*\s*==UserScript==[\s\S]*?==\/UserScript==\s*\*\/)/;
+      var m = src.match(re);
+      if (!m) return null;
+      /* ★ 关键：头块必须在文件开头，前面只允许空白/注释。
+         否则「脚本代码里的 ==UserScript== 字面量」会被误判成元数据头，
+         codeBody 会把它从中间切掉 —— 实测 var s='// ==UserScript==';
+         被截成 var s='  → 生成语法错误的脚本。 */
+      if (!onlyComments(src.slice(0, m.index))) return null;
+      return { text: m[0], index: m.index, len: m[0].length, style: m[0].charAt(1) === '*' ? 'block' : 'line' };
+    }
+
     function parseMeta(code) {
-      var meta = { name: '', namespace: '', version: '', description: '', matches: [], grants: [], runAt: '' };
-      var head = code.match(/^\s*\/\/\s*==UserScript==([\s\S]*?)\/\/\s*==\/UserScript==/);
-      if (!head) return meta;
-      var body = head[1];
-      var re = /^\s*\/\/\s*@(\w+)(?:\s+([\s\S]*?))?\s*$/gm, m;
+      /* hasRule：原头是否已有任何匹配规则（@match/@include/@exclude/@exclude-match）。
+         有就绝不自动补默认通配规则，否则脚本会在所有网站运行。 */
+      var meta = { name: '', namespace: '', version: '', description: '', matches: [], grants: [], runAt: '', hasRule: false };
+      var blk = metaBlock(code);
+      if (!blk) return meta;
+      var body = blk.text;
+      /* ★ 关键修复：指令名必须允许连字符。
+         旧写法是 @(\w+)，而 \w 不含 '-'，于是 @run-at 永远匹配不到，
+         导致：原脚本的 @run-at document-start 被当成「不存在」，
+         被 autoMeta 强制写成 document-idle —— 依赖 document-start 抢先劫持
+         的脚本（如菜单提取器）就再也抓不到菜单了。 */
+      /* 值必须限定在单行内：用 [^\n\r] 而不是 [\s\S]，
+         否则 \s+ 会吃掉换行符，把下一行当成当前指令的值
+         （实测 @noframes 后面没有值时，会吞掉整行 @match）。 */
+      /* ★ (?=[ \t]|$) 必须加：否则 @name:zh-CN / @description:zh-CN 这类
+         带语种后缀的指令会被当成 @name / @description，
+         把真正的脚本名覆盖成 ":zh-CN 自动无缝翻页"。
+         加了前瞻后这些行不参与字段解析（但仍在 rawHeadItems 中原样保留）。 */
+      var re = /^[ \t]*\/\/[ \t]*@([\w.-]+)(?=[ \t]|$)(?:[ \t]+([^\n\r]*?))?[ \t]*$/gm, m;
       while ((m = re.exec(body)) !== null) {
-        var k = m[1].toLowerCase(), v = (m[2] || '').trim();
-        if (k === 'match' || k === 'include' || k === 'matches') { if (v) meta.matches.push(v); }
+        var k = m[1].toLowerCase().replace(/[-_]/g, ''), v = (m[2] || '').trim();
+        /* ★ @include / @exclude / @exclude-match 语义与 @match 不同
+           （include 支持正则，如 /^https?:\/\/x/），绝不能改写成 @match，
+           它们一律靠 raw 原样保留。这里只把真正的 @match 收进可编辑列表。 */
+        if (k === 'match') { if (v) { meta.matches.push(v); meta.hasRule = true; } }
+        else if (k === 'include' || k === 'exclude' || k === 'excludematch') { meta.hasRule = true; }
         else if (k === 'grant') { if (v) meta.grants.push(v); }
-        else if (k === 'run-at') meta.runAt = v;
+        else if (k === 'runat') meta.runAt = v;
         else if (k === 'name') meta.name = v;
         else if (k === 'namespace') meta.namespace = v;
         else if (k === 'version') meta.version = v;
         else if (k === 'description') meta.description = v;
       }
       return meta;
+    }
+
+    /* 读取原头块的全部指令行（保序），用于「忠实还原」：
+       除对话框里改的字段外，其余指令（@require / @connect / @icon /
+       @author / @noframes / @resource ...）必须原样保留，否则脚本功能受损。 */
+    function rawHeadItems() {
+      return headItemsOf(lastText);
+    }
+
+    /* 提取任意脚本文本的头块指令行（保序），供生成与自检共用。
+       必须「宽松」匹配 @name:zh-CN 这类带语种后缀的行，
+       否则它们不会进入 items，就会在输出时被丢弃。
+       key 只用于归类判断，这些行的输出一律走 raw 原样保留。 */
+    function headItemsOf(text) {
+      var blk = metaBlock(String(text || ''));
+      if (!blk) return null;
+      var re = /^[ \t]*\/\/?[ \t]*\*?[ \t]*@([\w.:+-]+)(?:[ \t]+([^\n\r]*?))?[ \t]*(?:\*\/)?[ \t]*$/gm;
+      var items = [], m;
+      while ((m = re.exec(blk.text)) !== null) {
+        items.push({
+          key: m[1].toLowerCase().replace(/[-_]/g, ''),
+          val: (m[2] || '').trim(),
+          /* 保留原始行文本：未知指令原样输出，连空格格式都不变，最忠实 */
+          raw: m[0].trim()
+        });
+      }
+      return items;
     }
 
     /* ---------- 智能补全：缺头补头，缺关键字段填默认值 ---------- */
@@ -1192,33 +1414,209 @@ var BODY =
       if (!m.namespace) m.namespace = 'com.example.fv';
       if (!m.version) m.version = '1.0';
       if (!m.description) m.description = '由 FV 本地预览器安装（源文件：' + lastName + '）';
-      if (!m.matches.length) m.matches = ['*://*/*'];
+      m.matches = m.matches.map(function (x) { return String(x).replace(/\r/g, '').trim(); }).filter(function (x) { return !!x; });
+      if (!m.matches.length && !m.hasRule) m.matches = ['*://*/*'];
       if (!m.runAt) m.runAt = 'document-idle';
-      m.hadHead = /^\s*\/\/\s*==UserScript==/.test(lastText);
+      m.hadHead = !!metaBlock(lastText);
       return m;
     }
 
     /* ---------- 用字段生成最终脚本文本 ---------- */
+    /* 生成最终安装内容。
+       ★ 有原头时必须「忠实还原」：以原头块为基础，只替换对话框里改过的字段，
+       其余指令（@grant / @require / @connect / @icon / @author / @noframes ...）
+       一律原样保留。旧实现只保留 6 个字段，其余全丢，会直接破坏脚本功能。 */
     function composeCode(meta) {
-      var head = [
-        '// ==UserScript==',
-        '// @name         ' + meta.name,
-        '// @namespace    ' + meta.namespace,
-        '// @version      ' + meta.version,
-        '// @description  ' + meta.description,
-        '// @run-at       ' + meta.runAt
-      ];
-      meta.matches.forEach(function (u) { head.push('// @match        ' + u); });
-      meta.grants.forEach(function (g) { head.push('// @grant        ' + g); });
-      head.push('// ==/UserScript==', '');
-      return head.join('\n') + '\n' + codeBody();
+      var EDIT = ['name', 'namespace', 'version', 'description', 'runat'];
+      var items = rawHeadItems();
+      if (!items) {
+        var head = [
+          '// ==UserScript==',
+          '// @name         ' + meta.name,
+          '// @namespace    ' + meta.namespace,
+          '// @version      ' + meta.version,
+          '// @description  ' + meta.description,
+          '// @run-at       ' + (meta.runAt || 'document-idle')
+        ];
+        meta.matches.forEach(function (u) { head.push('// @match        ' + u); });
+        meta.grants.forEach(function (g) { head.push('// @grant        ' + g); });
+        head.push('// ==/UserScript==');
+        var b = codeBody();
+        if (b.charAt(0) !== '\n') b = '\n\n' + b;
+        return head.join('\n') + b;
+      }
+      var out = [], done = {}, matchDone = false;
+      function line(k, v) { return v ? ('// @' + k + ' ' + v) : ('// @' + k); }
+      /* 保留原始空格对齐：原文件多用 // @run-at______document-start 这种
+         对齐写法，统一成单空格虽不影响解析，但会让产物与原文件不一致。 */
+      function gapOf(raw) {
+        var m = String(raw || '').match(/^[ \t]*\/\/?[ \t]*\*?[ \t]*@[\w.:+-]+([ \t]+)/);
+        return (m && m[1]) ? m[1] : ' ';
+      }
+      function emitEditable(k, origRaw) {
+        var v = (k === 'runat') ? meta.runAt : meta[k];
+        if (v === undefined || v === null) return;
+        var keyName = (k === 'runat') ? 'run-at' : k;
+        out.push(v ? ('// @' + keyName + gapOf(origRaw) + v) : ('// @' + keyName));
+      }
+      function emitMatches() {
+        meta.matches.forEach(function (u) { out.push('// @match ' + u); });
+      }
+      items.forEach(function (it) {
+        if (it.key === 'match') {
+          if (!matchDone) { emitMatches(); matchDone = true; }
+          return;
+        }
+        if (EDIT.indexOf(it.key) >= 0) {
+          if (!done[it.key]) { emitEditable(it.key, it.raw); done[it.key] = 1; }
+          return;
+        }
+        /* 未知/其他指令：原样保留原始行（连空格格式都不改，最忠实） */
+        out.push(it.raw || line(it.key, it.val));
+      });
+      if (!matchDone && meta.matches.length) emitMatches();
+      EDIT.forEach(function (k) { if (!done[k]) emitEditable(k, null); });
+      var b = codeBody();
+      if (b.charAt(0) !== '\n') b = '\n\n' + b;
+      return ['// ==UserScript=='].concat(out, ['// ==/UserScript==']).join('\n') + b;
     }
     /* 去掉原有元数据头后的纯代码体 */
     function codeBody() {
-      var t = String(lastText);
-      var m = t.match(/^\s*\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==/);
-      if (m) return t.slice(m.index + m[0].length).replace(/^\s*\n/, '');
-      return t;
+      return bodyOfText(lastText);
+    }
+    function bodyOfText(text) {
+      var t = String(text || '');
+      var blk = metaBlock(t);
+      if (!blk) return t;
+      /* 精确移除头块本身，保留块前后的内容（块前的说明注释属于代码）。
+         前导换行原样保留：有的脚本头后无空行，有的有，统一改写会差一个字符。 */
+      return t.slice(0, blk.index) + t.slice(blk.index + blk.len);
+    }
+
+    /* ============================================================
+       安装前自检
+       比对「原文件」与「即将安装的内容」，把差异分成三档：
+         严重：丢失指令 / 代码体不一致 / 生成体语法错误 / 头块数量异常 → 必须二次确认
+         补全：原文件没有、由安装器补的默认字段                      → 仅提示
+         新增：非补全却多出来的指令                                  → 仅提示
+       目的：以后遇到任何新脚本都能自动兜底，不必逐个人工核对。
+    ============================================================ */
+    /* 这六个字段在确认面板里可编辑，且缺了会被自动补默认值。
+       它们产生的差异来自「用户主动修改」或「正常补全」，不是安装器的 bug，
+       因此单独归入 edited / filled 两档提示，不计入严重问题。
+       真正需要拦下的是 grant / require / connect / icon / author 等
+       不可编辑指令的丢失 —— 那才是会破坏脚本功能的问题。 */
+    var FILL_KEYS = { name: 1, namespace: 1, version: 1, description: 1, runat: 1, match: 1 };
+
+    function selfCheck(origText, out) {
+      var r = { ok: true, lost: [], added: [], filled: [], edited: [], editedFrom: [], editedTo: [], bodyDiff: false, parseErr: '', heads: 1, bodyLen: 0 };
+      var A = headItemsOf(origText) || [], B = headItemsOf(out) || [];
+      var cnt = function (arr) {
+        var c = {};
+        arr.forEach(function (it) { var k = it.key + '|' + it.val; c[k] = (c[k] || 0) + 1; });
+        return c;
+      };
+      var ca = cnt(A), cb = cnt(B), hasKey = {};
+      A.forEach(function (it) { hasKey[it.key] = 1; });
+      Object.keys(ca).forEach(function (k) {
+        var miss = ca[k] - (cb[k] || 0);
+        var key = k.split('|')[0];
+        for (var i = 0; i < miss; i++) { if (FILL_KEYS[key]) { r.edited.push(k); r.editedFrom.push(k); } else r.lost.push(k); }
+      });
+      Object.keys(cb).forEach(function (k) {
+        var extra = cb[k] - (ca[k] || 0);
+        var key = k.split('|')[0];
+        for (var i = 0; i < extra; i++) {
+          if (!hasKey[key] && FILL_KEYS[key]) r.filled.push(k);
+          else if (FILL_KEYS[key]) { r.edited.push(k); r.editedTo.push(k); }
+          else r.added.push(k);
+        }
+      });
+      /* ★ 两头都要去掉首尾空白：
+         无头脚本的原文本整体就是代码体，而生成时会在头块后补 '\n\n' 前缀，
+         只 trim 尾部会把它误判成「代码体不一致」，导致每个无头文件都被拦下。 */
+      var bo = String(bodyOfText(origText)).replace(/^\s+|\s+$/g, '');
+      var bn = String(bodyOfText(out)).replace(/^\s+|\s+$/g, '');
+      r.bodyDiff = (bo !== bn);
+      r.bodyLen = bn.length;
+      /* 只在原代码体本身能解析时才判定：原脚本自带语法错误不该算到安装器头上 */
+      var origOk = true;
+      try { new Function(bo); } catch (e) { origOk = false; }
+      if (origOk) { try { new Function(bn); } catch (e2) { r.parseErr = String(e2.message || e2); } }
+      r.heads = (String(out).match(/^[ \t]*\/\/[ \t]*==UserScript==[ \t]*$/gm) || []).length;
+      r.ok = !r.lost.length && !r.bodyDiff && !r.parseErr && r.heads === 1;
+      return r;
+    }
+
+    function shortItem(k) {
+      var p = String(k).split('|');
+      return '@' + p[0] + (p[1] ? ' ' + p[1] : '').slice(0, 40);
+    }
+
+    /* 把「改字段」配对成「旧 → 新」：
+       改一个字段在集合上等于「删掉旧值 + 加入新值」，不配对会显示成两条，看不出是改动。 */
+    function editedPairs(r) {
+      return (r.editedTo || []).map(function (k) {
+        var key = k.split('|')[0], old = '';
+        (r.editedFrom || []).forEach(function (x) { if (!old && x.split('|')[0] === key) old = x; });
+        return old ? (shortItem(old) + ' → ' + shortItem(k)) : shortItem(k);
+      });
+    }
+
+    function checkSummary(r) {
+      if (r.ok && !r.added.length && !r.filled.length) {
+        return '✅ 自检通过：元数据与代码体与原文件一致（' + (r.heads ? '' : '') + '代码体 ' + r.bodyLen + ' 字符）';
+      }
+      var s = [];
+      if (r.ok) s.push('✅ 无丢失、代码体一致（' + r.bodyLen + ' 字符）');
+      if (r.lost.length) s.push('❌ 丢失 ' + r.lost.length + ' 条：' + r.lost.slice(0, 5).map(shortItem).join(' | ') + (r.lost.length > 5 ? ' …' : ''));
+      if (r.bodyDiff) s.push('❌ 代码体与原文件不一致');
+      if (r.parseErr) s.push('❌ 生成的代码体语法错误：' + r.parseErr.slice(0, 60));
+      if (r.heads !== 1) s.push('❌ 头块数量异常：' + r.heads + '（应为 1）');
+      if (r.filled.length) s.push('➕ 自动补全 ' + r.filled.length + ' 条：' + r.filled.slice(0, 4).map(shortItem).join(' | ') + (r.filled.length > 4 ? ' …' : ''));
+      var pairs = editedPairs(r);
+      if (pairs.length) s.push('✏ 已按你的修改调整 ' + pairs.length + ' 处：' + pairs.slice(0, 4).join(' | ') + (pairs.length > 4 ? ' …' : ''));
+      if (r.added.length) s.push('⚠ 新增 ' + r.added.length + ' 条：' + r.added.slice(0, 4).map(shortItem).join(' | ') + (r.added.length > 4 ? ' …' : ''));
+      return s.join('\n');
+    }
+
+    function updateCheck(code) {
+      var el = $('fv-dlg-check');
+      if (!el) return;
+      var r = selfCheck(String(lastText || ''), code);
+      lastCheck = r;
+      el.textContent = checkSummary(r);
+      el.style.background = r.ok ? '#f0fdf4' : '#fff5f5';
+      el.style.color = r.ok ? '#166534' : '#b42318';
+    }
+
+    /* 自检发现严重问题时的二次确认（层要高于安装面板，否则看不见） */
+    function confirmRisky(chk, onYes) {
+      var cf = $('fv-cf');
+      if (!cf) { onYes(); return; }
+      var lines = [];
+      if (chk.lost.length) {
+        lines.push('丢失指令 ' + chk.lost.length + ' 条：');
+        chk.lost.slice(0, 20).forEach(function (x) { lines.push('  · ' + shortItem(x)); });
+        if (chk.lost.length > 20) lines.push('  …共 ' + chk.lost.length + ' 条');
+      }
+      if (chk.bodyDiff) lines.push('代码体与原文件不一致（可能被截断，或旧头被当成代码保留）');
+      if (chk.parseErr) lines.push('生成的代码体存在语法错误：' + chk.parseErr);
+      if (chk.heads !== 1) lines.push('头块数量异常：' + chk.heads + '（应为 1）');
+      $('fv-cf-t').textContent = '⚠ 自检发现问题';
+      $('fv-cf-b').textContent = lines.join('\n') + '\n\n继续安装可能得到一个残缺的脚本。';
+      var box = $('fv-cf-btns');
+      box.innerHTML = '';
+      var mk = function (t, bg, fg, fn) {
+        var b = document.createElement('button');
+        b.textContent = t;
+        b.style.cssText = 'flex:1;padding:12px;border:none;border-radius:10px;font:600 14px system-ui;background:' + bg + ';color:' + fg + ';cursor:pointer';
+        b.onclick = function () { cf.classList.remove('on'); setTimeout(fn, 40); };
+        box.appendChild(b);
+      };
+      mk('✕ 取消', '#f3f4f6', '#333', function () {});
+      mk('仍然安装', '#b42318', '#fff', onYes);
+      cf.classList.add('on');
     }
 
     /* ---------- 安装确认面板（字段可编辑） ---------- */
@@ -1275,10 +1673,13 @@ var BODY =
       return m;
     }
     function refreshDlgCode() {
-      var code = composeCode(readDlgMeta());
+      var meta = readDlgMeta();
+      var code = composeCode(meta);
       $('fv-dlg-code').textContent = code;
       installCode = code;
-      installName = (readDlgMeta().name || 'script') + '.user.js';
+      installName = (meta.name || 'script') + '.user.js';
+      /* 每次刷新预览都重跑自检：改了字段也能立刻看到是否引入问题 */
+      updateCheck(code);
     }
 
     /* ---------- 真正安装 ---------- */
@@ -1294,8 +1695,25 @@ var BODY =
       if (!txt) { try { txt = window.__fvDiagText ? window.__fvDiagText() : ''; } catch (e) {} }
       if (!txt) txt = '(诊断未生成：外层脚本未执行到挂载点，或 DOM 桥不可用)';
 
+      /* ---- 追加安装自检结论：确认当前脚本装下去是否完整 ---- */
+      var L = ['', '—— 安装自检 ——'];
+      if (!lastCheck) {
+        L.push('尚未运行（打开「安装脚本」面板即会自动自检）');
+      } else {
+        L.push('结论: ' + (lastCheck.ok ? '✅ 通过' : '❌ 发现问题'));
+        L.push('代码体长度: ' + lastCheck.bodyLen);
+        L.push('丢失指令: ' + (lastCheck.lost.length ? lastCheck.lost.length + ' 条 → ' + lastCheck.lost.slice(0, 5).map(shortItem).join(' | ') : '无'));
+        L.push('代码体一致: ' + (lastCheck.bodyDiff ? '否（异常）' : '是'));
+        L.push('语法检查: ' + (lastCheck.parseErr ? '失败 ' + lastCheck.parseErr : '通过'));
+        L.push('头块数量: ' + lastCheck.heads);
+        var nf = lastCheck.filled.length, na = lastCheck.added.length, ne = lastCheck.edited.length;
+        if (nf) L.push('自动补全: ' + nf + ' 条（' + lastCheck.filled.slice(0, 4).map(shortItem).join(' | ') + '）');
+        if (ne) L.push('按修改调整: ' + editedPairs(lastCheck).slice(0, 4).join(' | '));
+        if (na) L.push('新增: ' + na + ' 条（' + lastCheck.added.slice(0, 4).map(shortItem).join(' | ') + '）');
+      }
+
       /* ---- 追加全屏诊断：定位「白屏」到底卡在哪一环 ---- */
-      var L = ['', '—— 全屏诊断 ——'];
+      L.push('', '—— 全屏诊断 ——');
       try {
         L.push('当前文件: ' + (lastName || '(无)') + '  类型: ' + (lastKind || '-'));
         L.push('内容长度: ' + (lastText ? lastText.length : 0) + ' 字符');
@@ -1321,16 +1739,17 @@ var BODY =
           }
           var ib2 = document.getElementById('fv-ov-inline');
           if (ib2) L.push('inline 容器: display=' + (ib2.style.display || '-') + '  内容长度=' + ib2.innerHTML.length);
-          L.push('判读：先看「★ 渲染方式」。inline / srcdoc 为正常；若仍是 iframe blob 且');
-          L.push('      URL 以 blob:null 开头 → 该环境不支持 blob，需确认已走 srcdoc。');
+          L.push('判读：先看「★ 渲染方式」。inline / srcdoc 为正常；');
+          L.push('      带「无法读取校验」= iframe 内容读不到（跨域限制），未必是白屏；');
+          L.push('      若仍是 iframe blob 且 URL 以 blob:null 开头 → 该环境不支持 blob。');
         }
         L.push('');
         L.push('提示：js 全屏后顶部有绿色状态条，显示「脚本已执行，无可见输出」属正常。');
       } catch (e) { L.push('全屏诊断出错: ' + e.message); }
       txt += '\n' + L.join('\n');
-      instCode.textContent = txt;
-      instTip.textContent = '点「📋 复制日志」即可复制以上全部内容。上半看 typeof_ChromeXt（安装能力），下半看「渲染方式」（白屏原因）。';
-      try { var cb = $('fv-copy'); if (cb) cb.textContent = '📋 复制日志'; } catch (e) {}
+      instCode.value = txt;
+      instTip.textContent = '点「📋 一键复制日志」即可复制；若提示失败再手动长按文本区复制。上半看 typeof_ChromeXt（安装能力），下半看「渲染方式」（白屏原因）。';
+      try { var cb = $('fv-copy'); if (cb) cb.textContent = '📋 一键复制日志'; } catch (e) {}
       mask.classList.remove('on');
       dlgPanel.style.display = 'none';
       instPanel.style.display = 'flex';
@@ -1339,10 +1758,21 @@ var BODY =
     function installNow() {
       var meta = readDlgMeta();
       if (!meta.name) { msg('脚本名不能为空'); return; }
-      if (!meta.matches.length) { msg('至少填一条 @match'); return; }
+      if (!meta.matches.length && !/^[ \t]*\/\/[ \t]*@(include|exclude|exclude-match)(?=[ \t]|$)/m.test(String(lastText || ''))) {
+        msg('至少填一条 @match（或用 @include 等匹配规则）');
+        return;
+      }
       var code = composeCode(meta);
       installCode = code;
       installName = meta.name + '.user.js';
+      /* 安装前自检：发现严重问题先拦下并列出差异，确认后才真正写入 */
+      var chk = selfCheck(String(lastText || ''), code);
+      lastCheck = chk;
+      if (!chk.ok) { confirmRisky(chk, function () { doInstall(meta, code); }); return; }
+      doInstall(meta, code);
+    }
+
+    function doInstall(meta, code) {
       var CX = (window.__fvFindCX && window.__fvFindCX()) || window.__fvCX;
       if (!CX || typeof CX.dispatch !== 'function') {
         /* 错误页上拿不到 dispatch（GM 作用域未建立）→ 走中转：
@@ -1364,11 +1794,27 @@ var BODY =
       }
       try {
         CX.dispatch('installScript', code);
-        msg('已发送安装请求：' + meta.name + '。请到 ChromeXt 脚本列表确认（或打开匹配网页验证）。');
       } catch (e) {
         msg('安装失败：' + e.message);
         return;
       }
+      /* best-effort 校验：Kotlin 侧 insert 后会把脚本加进 scripts 数组，
+         若 JS 侧能看到同名脚本，说明确实入库了（看不到不代表失败，
+         因为该数组可能是页面加载时的快照）。 */
+      var confirmed = false;
+      try {
+        var list = CX.scripts;
+        if (list && list.length) {
+          for (var i = 0; i < list.length; i++) {
+            var it = list[i] || {};
+            var nm = String(it.name || (it.meta && it.meta.name) || '');
+            if (nm === meta.name) { confirmed = true; break; }
+          }
+        }
+      } catch (e) {}
+      msg(confirmed
+        ? '已安装并确认入库：' + meta.name
+        : '已发送安装请求：' + meta.name + '。请到 ChromeXt 脚本列表确认。');
       // 顺便用 notification 给个可见反馈
       try {
         CX.dispatch('notification', { id: 'fv-install', uuid: 0, title: 'FV 安装', text: '已安装：' + meta.name, timeout: 2500 });
@@ -1408,12 +1854,35 @@ var BODY =
     }
 
     /* ---------- 菜单 ---------- */
+    function isFull() {
+      try { return overlay.style.display === 'flex'; } catch (e) { return false; }
+    }
+
     function openMenu() {
       if (mask.classList.contains('on')) { mask.classList.remove('on'); return; }
+      /* 全屏时顶栏已隐藏，返回只能从悬浮球走 → 菜单首项给「退出全屏」。 */
+      if (isFull()) {
+        card.innerHTML = '';
+        var ft = document.createElement('div');
+        ft.className = 'ct'; ft.textContent = 'FV 全屏';
+        card.appendChild(ft);
+        [{ t: '✕ 退出全屏', f: closeFull, c: 1 },
+         { t: '⚡ 安装脚本（可改 @match）', f: openInstallDialog },
+         { t: '🔍 诊断（查白屏）', f: showDiag },
+         { t: '✕ 关闭菜单', f: function () {} }].forEach(function (it) {
+          var b = document.createElement('div');
+          b.className = 'mi' + (it.c ? ' close' : '');
+          b.textContent = it.t;
+          b.onclick = function (e) { e.stopPropagation(); mask.classList.remove('on'); setTimeout(it.f, 60); };
+          card.appendChild(b);
+        });
+        mask.classList.add('on');
+        return;
+      }
       var items = [
         { t: '📁 选择文件', f: function () { fileInput.click(); } },
         { t: '⚡ 安装脚本（可改 @match）', f: openInstallDialog },
-        { t: '🔍 诊断（查为何装不上）', f: showDiag },
+        { t: '🔍 诊断（随时可点，查安装/白屏）', f: showDiag },
         { t: '🖥️ 全屏打开', f: fullOpen },
         { t: '⚙️ 打开 ChromeXt 管理页', f: openManager },
         { t: '🧪 临时试运行（不安装）', f: runJs },
@@ -1450,7 +1919,9 @@ var BODY =
       if (e === 'pdf') { renderPdf(f); return; }
       if (f.size > 12 * 1024 * 1024) { msg('文件较大（' + (f.size / 1048576).toFixed(1) + 'MB），读取可能较慢'); }
       readArrayBuffer(f).then(function (buf) {
-        lastText = decodeText(buf);
+        /* 统一换行：CRLF/CR 归一为 LF。JS 不区分换行符，
+           但元数据正则按行匹配，残留的 \r 会让指令行匹配失败。 */
+        lastText = decodeText(buf).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
         route(f, lastText);
       }).catch(function () { msg('读取失败'); });
     });
@@ -1462,12 +1933,22 @@ var BODY =
       else msg('请先选择文件');
     };
     $('fv-home').onclick = function () { location.href = 'https://fv-local-preview.invalid/'; };
+    /* 只复制诊断日志。
+       旧版有 `instCode.value ? instCode.value : installCode` 的兜底，
+       一旦日志为空就会把「待安装脚本源码」复制出去 —— 用户看到的
+       「复制日志出来是脚本源码」就是这个兜底造成的。已彻底移除。 */
+    /* 只复制诊断日志。
+       旧版有 `: installCode` 兜底，会把「待安装脚本源码」复制出去；已彻底移除。
+       这里先尝试 clipboard API；不可用则全选文本并提示手动长按复制，
+       绝不用 execCommand（它会复制页面选区，导致复制出错误内容）。 */
     $('fv-copy').onclick = function () {
-      var txt = (instCode && instCode.textContent) ? instCode.textContent : installCode;
-      if (!txt) { msg('没有可复制的内容'); return; }
-      copyText(txt, function (ok) { msg(ok ? '已复制到剪贴板（' + txt.length + ' 字符）' : '复制失败，请长按内容手动复制'); });
+      var txt = (instCode && instCode.value) ? instCode.value : '';
+      if (!txt) { msg('还没有日志内容，请先稍等或重新点一次诊断'); return; }
+      copyText(txt, function (ok, way) {
+        if (ok) msg('已复制（' + way + '，' + txt.length + ' 字符）');
+        else { selectLogText(); msg('复制失败，已全选 ' + txt.length + ' 字符，请手动复制'); }
+      });
     };
-    $('fv-mgr2').onclick = openManager;
     $('fv-inst-close').onclick = function () { instPanel.style.display = 'none'; };
     $('fv-dlg-install').onclick = installNow;
     $('fv-dlg-refresh').onclick = refreshDlgCode;
@@ -1483,7 +1964,7 @@ var BODY =
       } catch (e) { msg('下载失败'); }
     };
 
-    preBox.ondblclick = function () { var e = ext(); if (e === 'js' || e === 'mjs') openInstall(); };
+    preBox.ondblclick = function () { var e = ext(); if (e === 'js' || e === 'mjs') openInstallDialog(); };
     fab.onclick = function (e) { e.stopPropagation(); openMenu(); };
     mask.onclick = function (e) { if (e.target === mask) mask.classList.remove('on'); };
 
